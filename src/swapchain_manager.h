@@ -25,6 +25,7 @@ public:
     VkFormat getImageFormat() const { return m_imageFormat; }
     VkFormat getDepthFormat() const { return m_depthFormat; }
     uint32_t getImageCount() const { return static_cast<uint32_t>(m_images.size()); }
+    VkImageView getImageView(uint32_t index) const { return m_imageViews[index]; }
 
     // Sync objects (per frame-in-flight)
     static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;

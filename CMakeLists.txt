@@ -8,6 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Vulkan REQUIRED)
 find_package(glfw3 REQUIRED)
 find_package(glm REQUIRED)
+find_package(tinyobjloader REQUIRED)
 
 # add_subdirectory(external/glfw)
 add_subdirectory(vk-bootstrap)
@@ -25,6 +26,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     glfw
     vk-bootstrap::vk-bootstrap
     glm::glm
+    tinyobjloader::tinyobjloader
 )
 
 # ─── Shader compilation (custom target) ───
