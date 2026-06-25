@@ -27,11 +27,15 @@ bool VulkanContext::init(GLFWwindow* window) {
         return false;
     }
 
+    VkPhysicalDeviceFeatures features{};
+    features.fragmentStoresAndAtomics = VK_TRUE;
+
     // ─── Physical Device ───
     vkb::PhysicalDeviceSelector phys_selector(vkb_instance);
     auto phys_result = phys_selector
         .set_surface(surface)
         .set_minimum_version(1, 3)
+        .set_required_features(features)
         .prefer_gpu_device_type(vkb::PreferredDeviceType::discrete)
         .require_dedicated_transfer_queue()
         .select();
@@ -47,7 +51,7 @@ bool VulkanContext::init(GLFWwindow* window) {
 
     // ─── Logical Device ───
     vkb::DeviceBuilder device_builder(vkb_physical_device);
-    auto device_result = device_builder.build();
+    auto device_result = device_builder.add_pNext(&features).build();
 
     if (!device_result) {
         std::cerr << "Failed to create logical device: " 

@@ -37,7 +37,6 @@ public:
                     VkBuffer vertexBuffer,
                     VkBuffer indexBuffer,
                     const std::vector<SceneObject>& objects,  // ← Changed
-                    VkPipelineLayout sceneLayout,
                     const glm::mat4& viewProj,
                     uint32_t swapchainImageIndex);
 

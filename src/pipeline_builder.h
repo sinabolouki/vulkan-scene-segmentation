@@ -48,6 +48,8 @@ public:
     PipelineBuilder& disableBlending();       // Default: write all, no blend
     PipelineBuilder& setColorBlendAttachmentCount(uint32_t count);
 
+    PipelineBuilder& setNoColorAttachments();  // For passes with no color output (e.g., collect pass)
+
     // ─── Dynamic State ───
     PipelineBuilder& setDynamicStates(const std::vector<VkDynamicState>& states);
 

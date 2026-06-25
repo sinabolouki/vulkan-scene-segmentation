@@ -184,6 +184,11 @@ PipelineBuilder& PipelineBuilder::setColorBlendAttachmentCount(uint32_t count) {
     return *this;
 }
 
+PipelineBuilder& PipelineBuilder::setNoColorAttachments() {
+    m_colorBlendAttachments.clear();
+    return *this;
+}
+
 // Dynamic State
 PipelineBuilder& PipelineBuilder::setDynamicStates(const std::vector<VkDynamicState>& states) {
     m_dynamicStates = states;
@@ -265,17 +270,19 @@ VkPipeline PipelineBuilder::build(VkDevice device) {
     depthStencil.maxDepthBounds = m_maxDepthBounds;
     depthStencil.stencilTestEnable = VK_FALSE;
 
-    // ─── Color Blending ───
-    // Ensure at least one attachment
-    if (m_colorBlendAttachments.empty()) {
-        disableBlending();
-    }
+    // // ─── Color Blending ───
+    // // Ensure at least one attachment
+    // if (m_colorBlendAttachments.empty()) {
+    //     disableBlending();
+    // }
+
+
 
     VkPipelineColorBlendStateCreateInfo colorBlending{};
     colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     colorBlending.logicOpEnable = VK_FALSE;
     colorBlending.attachmentCount = static_cast<uint32_t>(m_colorBlendAttachments.size());
-    colorBlending.pAttachments = m_colorBlendAttachments.data();
+    colorBlending.pAttachments = m_colorBlendAttachments.empty() ? nullptr : m_colorBlendAttachments.data();
 
     // ─── Dynamic State ───
     // Add viewport/scissor as dynamic if using dynamic viewport
