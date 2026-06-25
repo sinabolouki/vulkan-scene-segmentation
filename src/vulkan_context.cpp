@@ -51,7 +51,7 @@ bool VulkanContext::init(GLFWwindow* window) {
 
     // ─── Logical Device ───
     vkb::DeviceBuilder device_builder(vkb_physical_device);
-    auto device_result = device_builder.add_pNext(&features).build();
+    auto device_result = device_builder.build();
 
     if (!device_result) {
         std::cerr << "Failed to create logical device: " 

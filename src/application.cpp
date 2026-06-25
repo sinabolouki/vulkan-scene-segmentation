@@ -34,7 +34,7 @@ bool Application::init(uint32_t width, uint32_t height, const std::string& title
     if (!createCommandBuffers()) return false;
 
     // Scene
-    std::string scenePath = "../asssets/scene.obj";
+    std::string scenePath = "../assets/simple_scene.obj";
     if (!m_scene.loadFromOBJ(scenePath)) {
         std::cerr << "Failed to load scene: " << scenePath << std::endl;
         return false;
