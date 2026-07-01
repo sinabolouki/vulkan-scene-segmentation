@@ -26,8 +26,10 @@ public:
     static constexpr uint32_t PPLL_NULL = 0xFFFFFFFF;
 
     // Adjustable at runtime
-    float depthThreshold = 0.02f;
-    int debugDisplayLayer = -1; // -1 = off, 0..NUM_PEEL_LAYERS-1 = show that layer
+    float depthThreshold = 0.02f;       // Max depth difference for neighbor similarity
+    float colorThreshold = 0.15f;       // Max color distance for neighbor similarity
+    uint32_t growIterations = 20;       // Number of grow passes per layer
+    int debugDisplayLayer = -1;         // -1 = composite all, 0-3 = show single layer
 
     // ─── Public Interface ───
     bool init(VulkanContext& context, SwapchainManager& swapchain);
@@ -68,7 +70,7 @@ private:
     // COMMAND RECORDING PHASES
     // ═══════════════════════════════════════════════════════════
 
-    // Phase 1: Reset head pointers, counter, state
+    // Phase 1: Reset head pointers, counter, label, consumed depth, state
     void recordClearPhase(VkCommandBuffer cmd);
 
     // Phase 2: Rasterize geometry → insert all fragments into PPLL
@@ -83,13 +85,19 @@ private:
     // Phase 4 (per layer): Find global minimum depth among unconsumed fragments
     void recordFindMinPhase(VkCommandBuffer cmd);
 
-    // Phase 5 (per layer): Resolve — composite fragments in depth range
+    // Phase 5 (per layer): Initialize labels — pixels near global min get labeled
+    void recordSeedPhase(VkCommandBuffer cmd);
+
+    // Phase 6 (per layer): Grow region — expand labels to similar neighbors, repeated K times
+    void recordGrowPhase(VkCommandBuffer cmd);
+
+    // Phase 7 (per layer): Resolve — output labeled pixels, update consumed depth
     void recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex);
 
-    // Phase 6 (per layer): Update state — consumedDepth = globalMin + threshold
-    void recordUpdateStatePhase(VkCommandBuffer cmd);
+    // Phase 8 (per layer): Clear labels + reset global min for next layer
+    void recordClearLabelsPhase(VkCommandBuffer cmd);
 
-    // Phase 7: Blend all layers back-to-front onto swapchain
+    // Phase 9: Blend all layers back-to-front onto swapchain
     void recordCompositePhase(VkCommandBuffer cmd, uint32_t swapchainImageIndex);
 
     // Generic memory barrier helper
@@ -134,13 +142,30 @@ private:
     VkDeviceMemory m_nodeBufferMemory = VK_NULL_HANDLE;
     uint32_t       m_nodeCapacity     = 0;
 
-    // Atomic counter (SSBO, 4 bytes): next free slot
+    // Atomic counter (SSBO, 4 bytes): next free slot in node buffer
     VkBuffer       m_atomicCounterBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_atomicCounterMemory = VK_NULL_HANDLE;
 
-    // State buffer (SSBO, 8 bytes): { uint globalMinUint, uint consumedDepthBits }
+    // State buffer (SSBO, 4 bytes): { uint globalMinUint }
+    // Used by find-min (write via atomicMin) and seed (read)
     VkBuffer       m_stateBuffer       = VK_NULL_HANDLE;
     VkDeviceMemory m_stateBufferMemory = VK_NULL_HANDLE;
+
+    // ═══════════════════════════════════════════════════════════
+    // REGION GROWING TEXTURES
+    // ═══════════════════════════════════════════════════════════
+
+    // Label image (R32_UINT): per-pixel, 0 = unlabeled, 1 = labeled
+    // Written by seed pass, read/written by grow pass, read by resolve
+    VkImage        m_labelImage  = VK_NULL_HANDLE;
+    VkDeviceMemory m_labelMemory = VK_NULL_HANDLE;
+    VkImageView    m_labelView   = VK_NULL_HANDLE;
+
+    // Consumed depth image (R32_SFLOAT): per-pixel, tracks how far we've peeled
+    // Read by find-min/seed/grow, written by resolve
+    VkImage        m_consumedDepthImage  = VK_NULL_HANDLE;
+    VkDeviceMemory m_consumedDepthMemory = VK_NULL_HANDLE;
+    VkImageView    m_consumedDepthView   = VK_NULL_HANDLE;
 
     // ═══════════════════════════════════════════════════════════
     // LAYER COLOR IMAGES (one per peel layer)
@@ -150,7 +175,7 @@ private:
         VkImage        image       = VK_NULL_HANDLE;
         VkDeviceMemory memory      = VK_NULL_HANDLE;
         VkImageView    view        = VK_NULL_HANDLE;
-        VkFramebuffer  framebuffer = VK_NULL_HANDLE; // For resolve output
+        VkFramebuffer  framebuffer = VK_NULL_HANDLE;
     };
     std::vector<LayerImage> m_layerImages;
 
@@ -158,26 +183,26 @@ private:
     // RENDER PASSES
     // ═══════════════════════════════════════════════════════════
 
-    // 0 attachments: used by collect, sort, find-min, update-state
+    // 0 attachments: collect, sort, find-min, seed, grow, clear-labels
     VkRenderPass m_noAttachmentRenderPass = VK_NULL_HANDLE;
 
-    // 1 color attachment (RGBA8): used by resolve → layer texture
+    // 1 color attachment (RGBA8): resolve → layer texture
     VkRenderPass m_layerRenderPass = VK_NULL_HANDLE;
 
-    // 1 color attachment (swapchain format): used by composite
+    // 1 color attachment (swapchain format): composite → swapchain
     VkRenderPass m_compositeRenderPass = VK_NULL_HANDLE;
 
     // ═══════════════════════════════════════════════════════════
     // FRAMEBUFFERS
     // ═══════════════════════════════════════════════════════════
 
-    // For collect/sort/find-min/update-state (no attachments)
+    // For collect/sort/find-min/seed/grow/clear-labels (no attachments)
     VkFramebuffer m_noAttachmentFramebuffer = VK_NULL_HANDLE;
 
     // For composite (one per swapchain image)
     std::vector<VkFramebuffer> m_compositeFramebuffers;
 
-    // Layer framebuffers are stored inside LayerImage::framebuffer
+    // Layer framebuffers stored inside LayerImage::framebuffer
 
     // ═══════════════════════════════════════════════════════════
     // SAMPLER (for composite pass to read layer textures)
@@ -189,10 +214,17 @@ private:
     // DESCRIPTOR LAYOUTS
     // ═══════════════════════════════════════════════════════════
 
-    // Shared PPLL set: head image (storage) + nodes (SSBO) + counter (SSBO) + state (SSBO)
+    // PPLL set (set 0):
+    //   binding 0: head pointer image    (storage image, r32ui)
+    //   binding 1: node buffer           (storage buffer)
+    //   binding 2: atomic counter        (storage buffer)
+    //   binding 3: state buffer          (storage buffer, { uint globalMinUint })
+    //   binding 4: label image           (storage image, r32ui)
+    //   binding 5: consumed depth image  (storage image, r32f)
     VkDescriptorSetLayout m_ppllDescLayout = VK_NULL_HANDLE;
 
-    // Composite set: layer textures as combined image samplers
+    // Composite set (set 0 in composite pipeline):
+    //   binding 0..N-1: layer color textures (combined image sampler)
     VkDescriptorSetLayout m_compositeDescLayout = VK_NULL_HANDLE;
 
     // ═══════════════════════════════════════════════════════════
@@ -200,31 +232,31 @@ private:
     // ═══════════════════════════════════════════════════════════
 
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet  m_ppllDescSet      = VK_NULL_HANDLE; // Used by collect, sort, find-min, resolve, update
-    VkDescriptorSet  m_compositeDescSet = VK_NULL_HANDLE; // Used by composite
+    VkDescriptorSet  m_ppllDescSet      = VK_NULL_HANDLE;
+    VkDescriptorSet  m_compositeDescSet = VK_NULL_HANDLE;
 
     // ═══════════════════════════════════════════════════════════
     // PIPELINE LAYOUTS
     // ═══════════════════════════════════════════════════════════
 
-    // Collect: set 0 = ppll, push = ScenePushConstants (model, viewProj, objectID)
+    // Collect: set 0 = ppll, push = ScenePushConstants
     VkPipelineLayout m_collectPipelineLayout = VK_NULL_HANDLE;
 
-    // Fullscreen passes (sort, find-min, resolve, update-state):
-    //   set 0 = ppll, push = { float depthThreshold }
+    // Fullscreen passes (sort, find-min, seed, grow, resolve):
+    //   set 0 = ppll, push = { float depthThreshold, float colorThreshold }
     VkPipelineLayout m_fullscreenPipelineLayout = VK_NULL_HANDLE;
 
-    // Composite: set 0 = composite textures, push = { uint numLayers }
+    // Composite: set 0 = composite textures, push = { uint numLayers, int displayLayer }
     VkPipelineLayout m_compositePipelineLayout = VK_NULL_HANDLE;
 
     // ═══════════════════════════════════════════════════════════
     // PIPELINES
     // ═══════════════════════════════════════════════════════════
-
-    VkPipeline m_collectPipeline     = VK_NULL_HANDLE; // Geometry → SSBO (no color, no depth test)
-    VkPipeline m_sortPipeline        = VK_NULL_HANDLE; // Fullscreen → rewrite next ptrs (no color)
-    VkPipeline m_findMinPipeline     = VK_NULL_HANDLE; // Fullscreen → atomicMin to state (no color)
-    VkPipeline m_updateStatePipeline = VK_NULL_HANDLE; // Fullscreen → update consumed depth (no color)
-    VkPipeline m_resolvePipeline     = VK_NULL_HANDLE; // Fullscreen → layer color output
-    VkPipeline m_compositePipeline   = VK_NULL_HANDLE; // Fullscreen → blend layers to swapchain
+    VkPipeline m_collectPipeline   = VK_NULL_HANDLE; // Geometry → SSBO (no color, no depth test)
+    VkPipeline m_sortPipeline      = VK_NULL_HANDLE; // Fullscreen → rewrite next ptrs (no color)
+    VkPipeline m_findMinPipeline   = VK_NULL_HANDLE; // Fullscreen → atomicMin to state (no color)
+    VkPipeline m_seedPipeline      = VK_NULL_HANDLE; // Fullscreen → write initial labels (no color)
+    VkPipeline m_growPipeline      = VK_NULL_HANDLE; // Fullscreen → expand labels to neighbors (no color)
+    VkPipeline m_resolvePipeline   = VK_NULL_HANDLE; // Fullscreen → layer color output
+    VkPipeline m_compositePipeline = VK_NULL_HANDLE; // Fullscreen → blend layers to swapchain
 };

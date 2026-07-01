@@ -1,19 +1,17 @@
 #version 450
 
+// ═══════════════════════════════════════════════════════════════════
 // RESOLVE PASS (per layer)
 //
-// Walks each pixel's sorted linked list.
-// Skips fragments with depth <= consumedDepth (already peeled).
-// Collects fragments within [consumedDepth, globalMin + threshold].
-// Composites them front-to-back (list is pre-sorted).
-// Stops early when depth exceeds the range.
-//
-// Outputs the layer color for this iteration.
+// For each pixel:
+//   If labeled → output first unconsumed fragment's color
+//                AND update consumed depth to that fragment's depth
+//   If not labeled → output transparent (alpha = 0)
+// ═══════════════════════════════════════════════════════════════════
 
 layout(location = 0) in vec2 fragUV;
 layout(location = 0) out vec4 outColor;
 
-// PPLL data structures
 layout(set = 0, binding = 0, r32ui) uniform coherent uimage2D headPointerImage;
 
 struct FragmentNode {
@@ -27,21 +25,17 @@ layout(set = 0, binding = 1, std430) readonly buffer NodeBuffer {
     FragmentNode nodes[];
 };
 
-// State buffer
-layout(set = 0, binding = 3, std430) readonly buffer StateBuffer {
-    uint globalMinUint;
-    uint consumedDepthBits;
-};
+layout(set = 0, binding = 4, r32ui) uniform readonly uimage2D labelImage;
+layout(set = 0, binding = 5, r32f) uniform image2D consumedDepthImage;
 
-// Push constant: depth threshold for grouping
 layout(push_constant) uniform PushConstants {
     float depthThreshold;
+    float colorThreshold;
 } pc;
 
 #define PPLL_NULL 0xFFFFFFFFu
 #define MAX_WALK  32
 
-// Unpack RGBA8 from uint
 vec4 unpackColor(uint packed) {
     float r = float((packed >> 0u)  & 0xFFu) / 255.0;
     float g = float((packed >> 8u)  & 0xFFu) / 255.0;
@@ -51,62 +45,38 @@ vec4 unpackColor(uint packed) {
 }
 
 void main() {
-    ivec2 pixelCoord = ivec2(gl_FragCoord.xy);
+    ivec2 pixel = ivec2(gl_FragCoord.xy);
 
-    uint headIndex = imageLoad(headPointerImage, pixelCoord).r;
-
-    // Empty pixel — transparent output
-    if (headIndex == PPLL_NULL) {
+    // Check if this pixel is labeled
+    uint label = imageLoad(labelImage, pixel).r;
+    if (label == 0u) {
         outColor = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
 
-    // Read state
-    float globalMinDepth = uintBitsToFloat(globalMinUint);
-    float consumedDepth = uintBitsToFloat(consumedDepthBits);
-    float maxDepth = globalMinDepth + pc.depthThreshold;
+    // Find first unconsumed fragment
+    uint headIndex = imageLoad(headPointerImage, pixel).r;
+    float consumedDepth = imageLoad(consumedDepthImage, pixel).r;
 
-    // Walk sorted list
-    uint currentIndex = headIndex;
+    uint idx = headIndex;
     int steps = 0;
 
-    // Front-to-back compositing (pre-multiplied alpha)
-    vec3  accumColor = vec3(0.0);
-    float accumAlpha = 0.0;
+    while (idx != PPLL_NULL && steps < MAX_WALK) {
+        float d = nodes[idx].depth;
 
-    while (currentIndex != PPLL_NULL && steps < MAX_WALK) {
-        float d = nodes[currentIndex].depth;
+        if (d > consumedDepth) {
+            // Output this fragment's color
+            outColor = unpackColor(nodes[idx].color);
 
-        // Skip already consumed fragments
-        if (d <= consumedDepth) {
-            currentIndex = nodes[currentIndex].next;
-            steps++;
-            continue;
+            // Update consumed depth — this fragment is now consumed
+            imageStore(consumedDepthImage, pixel, vec4(d, 0.0, 0.0, 0.0));
+            return;
         }
 
-        // Early exit: past this layer's depth range (list is sorted)
-        if (d > maxDepth) {
-            break;
-        }
-
-        // This fragment belongs to the current layer
-        vec4 fragColor = unpackColor(nodes[currentIndex].color);
-
-        // Front-to-back blending (under operator):
-        // accumColor += (1 - accumAlpha) * fragColor.rgb * fragColor.a
-        // accumAlpha += (1 - accumAlpha) * fragColor.a
-        float oneMinusAlpha = 1.0 - accumAlpha;
-        accumColor += oneMinusAlpha * fragColor.rgb * fragColor.a;
-        accumAlpha += oneMinusAlpha * fragColor.a;
-
-        // Fully opaque — no point continuing
-        if (accumAlpha >= 0.99) {
-            break;
-        }
-
-        currentIndex = nodes[currentIndex].next;
+        idx = nodes[idx].next;
         steps++;
     }
 
-    outColor = vec4(accumColor, accumAlpha);
+    // Labeled but no unconsumed fragment found (shouldn't happen normally)
+    outColor = vec4(0.0, 0.0, 0.0, 0.0);
 }
