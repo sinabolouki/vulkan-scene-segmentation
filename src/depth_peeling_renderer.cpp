@@ -704,7 +704,7 @@ void DepthPeelingRenderer::recordCommands(VkCommandBuffer cmd,
     scissor.extent = extent;
 
     std::array<VkClearValue, 2> clearValues{};
-    clearValues[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}}; // Transparent black
+    clearValues[0].color = { {0.0f, 0.0f, 0.0f, 0.0f} }; // Transparent black
     clearValues[1].depthStencil = {1.0f, 0};
 
     VkBuffer vertexBuffers[] = {vertexBuffer};
@@ -787,7 +787,7 @@ void DepthPeelingRenderer::recordCommands(VkCommandBuffer cmd,
     // ═══════════════════════════════════════════════════════════════════
     {
         VkClearValue compositeClear{};
-        compositeClear.color = {{0.02f, 0.02f, 0.08f, 1.0f}}; // Background
+        compositeClear.color = { {0.02f, 0.02f, 0.08f, 1.0f} }; // Background
 
         VkRenderPassBeginInfo rpInfo{};
         rpInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;

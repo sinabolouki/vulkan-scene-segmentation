@@ -1,40 +1,50 @@
 #version 450
 
+// RESOLVE PASS (per layer)
+//
+// Walks each pixel's sorted linked list.
+// Skips fragments with depth <= consumedDepth (already peeled).
+// Collects fragments within [consumedDepth, globalMin + threshold].
+// Composites them front-to-back (list is pre-sorted).
+// Stops early when depth exceeds the range.
+//
+// Outputs the layer color for this iteration.
+
 layout(location = 0) in vec2 fragUV;
 layout(location = 0) out vec4 outColor;
 
-// ═══ PPLL Data Structures (same bindings as collect) ═══
-
+// PPLL data structures
 layout(set = 0, binding = 0, r32ui) uniform coherent uimage2D headPointerImage;
 
 struct FragmentNode {
-    uint color;
+    uint  color;
     float depth;
-    uint objectID;
-    uint next;
+    uint  objectID;
+    uint  next;
 };
 
 layout(set = 0, binding = 1, std430) readonly buffer NodeBuffer {
     FragmentNode nodes[];
 };
 
-layout(set = 0, binding = 2, std430) readonly buffer AtomicCounter {
-    uint counter;
+// State buffer
+layout(set = 0, binding = 3, std430) readonly buffer StateBuffer {
+    uint globalMinUint;
+    uint consumedDepthBits;
 };
 
-// Screen dimensions via push constant
+// Push constant: depth threshold for grouping
 layout(push_constant) uniform PushConstants {
-    uint screenWidth;
-    uint screenHeight;
+    float depthThreshold;
 } pc;
 
-// Maximum fragments we can sort per pixel
-#define MAX_FRAGMENTS 32
+#define PPLL_NULL 0xFFFFFFFFu
+#define MAX_WALK  32
 
-// ═══ Unpack color from uint32 ═══
+// Unpack RGBA8 from uint
 vec4 unpackColor(uint packed) {
-    float r = float((packed >> 0u) & 0xFFu) / 255.0;
-    float g = float((packed >> 8u) & 0xFFu) / 255.0;
+    float r = float((packed >> 0u)  & 0xFFu) / 255.0;
+    float g = float((packed >> 8u)  & 0xFFu) / 255.0;
     float b = float((packed >> 16u) & 0xFFu) / 255.0;
     float a = float((packed >> 24u) & 0xFFu) / 255.0;
     return vec4(r, g, b, a);
@@ -43,62 +53,60 @@ vec4 unpackColor(uint packed) {
 void main() {
     ivec2 pixelCoord = ivec2(gl_FragCoord.xy);
 
-    // ─── Read the head pointer for this pixel ───
-    uint nodeIndex = imageLoad(headPointerImage, pixelCoord).r;
+    uint headIndex = imageLoad(headPointerImage, pixelCoord).r;
 
-    // If empty pixel, output background
-    if (nodeIndex == 0xFFFFFFFFu) {
-        outColor = vec4(0.02, 0.02, 0.08, 1.0);
+    // Empty pixel — transparent output
+    if (headIndex == PPLL_NULL) {
+        outColor = vec4(0.0, 0.0, 0.0, 0.0);
         return;
     }
 
-    // ─── Walk the linked list, collect fragments ───
-    float depths[MAX_FRAGMENTS];
-    vec4  colors[MAX_FRAGMENTS];
-    uint  objectIDs[MAX_FRAGMENTS];
-    int   fragCount = 0;
+    // Read state
+    float globalMinDepth = uintBitsToFloat(globalMinUint);
+    float consumedDepth = uintBitsToFloat(consumedDepthBits);
+    float maxDepth = globalMinDepth + pc.depthThreshold;
 
-    while (nodeIndex != 0xFFFFFFFFu && fragCount < MAX_FRAGMENTS) {
-        FragmentNode node = nodes[nodeIndex];
+    // Walk sorted list
+    uint currentIndex = headIndex;
+    int steps = 0;
 
-        depths[fragCount] = node.depth;
-        colors[fragCount] = unpackColor(node.color);
-        objectIDs[fragCount] = node.objectID;
-        fragCount++;
+    // Front-to-back compositing (pre-multiplied alpha)
+    vec3  accumColor = vec3(0.0);
+    float accumAlpha = 0.0;
 
-        nodeIndex = node.next;
-    }
+    while (currentIndex != PPLL_NULL && steps < MAX_WALK) {
+        float d = nodes[currentIndex].depth;
 
-    // ─── Sort fragments by depth (front-to-back: smallest depth first) ───
-    // Simple insertion sort (fine for small arrays on GPU)
-    for (int i = 1; i < fragCount; i++) {
-        float keyDepth = depths[i];
-        vec4  keyColor = colors[i];
-        uint  keyObjID = objectIDs[i];
-
-        int j = i - 1;
-        while (j >= 0 && depths[j] > keyDepth) {
-            depths[j + 1] = depths[j];
-            colors[j + 1] = colors[j];
-            objectIDs[j + 1] = objectIDs[j];
-            j--;
+        // Skip already consumed fragments
+        if (d <= consumedDepth) {
+            currentIndex = nodes[currentIndex].next;
+            steps++;
+            continue;
         }
-        depths[j + 1] = keyDepth;
-        colors[j + 1] = keyColor;
-        objectIDs[j + 1] = keyObjID;
+
+        // Early exit: past this layer's depth range (list is sorted)
+        if (d > maxDepth) {
+            break;
+        }
+
+        // This fragment belongs to the current layer
+        vec4 fragColor = unpackColor(nodes[currentIndex].color);
+
+        // Front-to-back blending (under operator):
+        // accumColor += (1 - accumAlpha) * fragColor.rgb * fragColor.a
+        // accumAlpha += (1 - accumAlpha) * fragColor.a
+        float oneMinusAlpha = 1.0 - accumAlpha;
+        accumColor += oneMinusAlpha * fragColor.rgb * fragColor.a;
+        accumAlpha += oneMinusAlpha * fragColor.a;
+
+        // Fully opaque — no point continuing
+        if (accumAlpha >= 0.99) {
+            break;
+        }
+
+        currentIndex = nodes[currentIndex].next;
+        steps++;
     }
 
-    // ─── Composite: back-to-front blending ───
-    // Start with background
-    vec4 result = vec4(0.02, 0.02, 0.08, 1.0);
-
-    // Blend from back to front (last element = farthest)
-    for (int i = fragCount - 1; i >= 0; i--) {
-        vec4 src = colors[i];
-        // Standard over operator: result = src * src.a + result * (1 - src.a)
-        result.rgb = src.rgb * src.a + result.rgb * (1.0 - src.a);
-        result.a = 1.0;
-    }
-
-    outColor = result;
+    outColor = vec4(accumColor, accumAlpha);
 }

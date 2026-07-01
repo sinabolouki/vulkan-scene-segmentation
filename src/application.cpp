@@ -41,6 +41,8 @@ bool Application::init(uint32_t width, uint32_t height, const std::string& title
     }
     if (!uploadSceneToGPU()) return false;
 
+    glfwSetKeyCallback(m_window, keyCallback);
+
     // Renderer
     if (!m_renderer.init(m_context, m_swapchain)) return false;
 
@@ -138,6 +140,48 @@ void Application::drawFrame() {
     }
 
     m_currentFrame = (m_currentFrame + 1) % SwapchainManager::MAX_FRAMES_IN_FLIGHT;
+}
+
+
+// Add the callback implementation:
+void Application::keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    if (action != GLFW_PRESS) return;
+
+    auto app = reinterpret_cast<Application*>(glfwGetWindowUserPointer(window));
+
+    switch (key) {
+        case GLFW_KEY_0:
+            app->m_renderer.debugDisplayLayer = -1;
+            std::cout << "[Debug] Showing: COMPOSITE (all layers)" << std::endl;
+            break;
+        case GLFW_KEY_1:
+            app->m_renderer.debugDisplayLayer = 0;
+            std::cout << "[Debug] Showing: Layer 0 (nearest)" << std::endl;
+            break;
+        case GLFW_KEY_2:
+            app->m_renderer.debugDisplayLayer = 1;
+            std::cout << "[Debug] Showing: Layer 1" << std::endl;
+            break;
+        case GLFW_KEY_3:
+            app->m_renderer.debugDisplayLayer = 2;
+            std::cout << "[Debug] Showing: Layer 2" << std::endl;
+            break;
+        case GLFW_KEY_4:
+            app->m_renderer.debugDisplayLayer = 3;
+            std::cout << "[Debug] Showing: Layer 3 (farthest)" << std::endl;
+            break;
+        case GLFW_KEY_EQUAL: // + key
+            app->m_renderer.depthThreshold *= 1.5f;
+            std::cout << "[Debug] Threshold: " << app->m_renderer.depthThreshold << std::endl;
+            break;
+        case GLFW_KEY_MINUS:
+            app->m_renderer.depthThreshold *= 0.66f;
+            std::cout << "[Debug] Threshold: " << app->m_renderer.depthThreshold << std::endl;
+            break;
+        case GLFW_KEY_ESCAPE:
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+            break;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

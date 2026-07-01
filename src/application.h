@@ -1,8 +1,8 @@
 #pragma once
 
 // CHOOSE RENDERING METHOD (uncomment ONE):
-// #define RENDER_METHOD_PPLL              // Per-Pixel Linked List
-#define RENDER_METHOD_DEPTH_PEELING   // Depth Peeling
+#define RENDER_METHOD_PPLL              // Per-Pixel Linked List
+// #define RENDER_METHOD_DEPTH_PEELING   // Depth Peeling
 
 #include "vulkan_context.h"
 #include "swapchain_manager.h"
@@ -69,6 +69,9 @@ private:
     //Frame
     void drawFrame();
     void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex);
+
+    // Callbacks
+    static void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods);
 
     //Helpers
     bool createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
