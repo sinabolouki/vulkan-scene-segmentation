@@ -70,6 +70,7 @@ void Application::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex) 
     glm::vec3 center = m_scene.getCenter();
     float radius = m_scene.getRadius();
     glm::vec3 eye = center + glm::vec3(0.0f, radius * 0.5f, radius * 2.0f);
+    eye = center + glm::vec3(1.5f, 1.0f,0.0f) * radius; // Slightly offset for better view
     glm::mat4 view = glm::lookAt(eye, center, glm::vec3(0.0f, 1.0f, 0.0f));
     glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.01f, radius * 10.0f);
     glm::mat4 viewProj = proj * view;
