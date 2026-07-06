@@ -4,6 +4,14 @@ layout(location = 0) in vec3 fragColor;
 layout(location = 1) in vec3 fragNormal;
 layout(location = 2) flat in uint fragObjectID;
 
+layout(push_constant) uniform PushConstants {
+    mat4 model;
+    mat4 viewProj;
+    uint objectID;
+    float nearPlane;
+    float farPlane;
+} pc;
+
 layout(set = 0, binding = 0, r32ui) uniform coherent uimage2D headPointerImage;
 
 struct FragmentNode {
@@ -29,8 +37,12 @@ uint packColor(vec4 color) {
     return (a << 24u) | (b << 16u) | (g << 8u) | r;
 }
 
+float linearizeDepth(float z) {
+    // Convert from non-linear [0,1] depth buffer to linear world-space distance
+    return (pc.nearPlane * pc.farPlane) / (pc.farPlane - z * (pc.farPlane - pc.nearPlane));
+}
+
 void main() {
-    // Use vertex color with simple diffuse lighting
     vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
     vec3 normal = normalize(fragNormal);
     float diffuse = max(dot(normal, lightDir), 0.0) * 0.7 + 0.3;
@@ -46,9 +58,13 @@ void main() {
     ivec2 pixelCoord = ivec2(gl_FragCoord.xy);
     uint prevHead = imageAtomicExchange(headPointerImage, pixelCoord, nodeIndex);
 
+    // Linearize depth: convert to [0, 1] range in LINEAR space
+    float linDepth = linearizeDepth(gl_FragCoord.z);
+    float normalizedDepth = (linDepth - pc.nearPlane) / (pc.farPlane - pc.nearPlane);
+
     // Write node
     nodes[nodeIndex].color = packColor(finalColor);
-    nodes[nodeIndex].depth = gl_FragCoord.z;
+    nodes[nodeIndex].depth = normalizedDepth;  // Linear [0, 1]
     nodes[nodeIndex].objectID = fragObjectID;
     nodes[nodeIndex].next = prevHead;
 }

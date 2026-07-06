@@ -25,8 +25,11 @@ public:
     static constexpr uint32_t NUM_PEEL_LAYERS = 4;
     static constexpr uint32_t PPLL_NULL = 0xFFFFFFFF;
 
+    float nearPlane = 0.01f;   // Near plane for depth normalization
+    float farPlane = 100.0f;   // Far plane for depth normalization
+
     // Adjustable at runtime
-    float depthThreshold = 0.00106932f;       // Max depth difference for neighbor similarity
+    float depthThreshold = 0.01f;       // Max depth difference for neighbor similarity
     float colorThreshold = 0.15f;       // Max color distance for neighbor similarity
     uint32_t growIterations = 100;       // Number of grow passes per layer
     int debugDisplayLayer = -1;         // -1 = composite all, 0-3 = show single layer

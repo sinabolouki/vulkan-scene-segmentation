@@ -714,13 +714,13 @@ void PPLLRenderer::recordCollectPhase(VkCommandBuffer cmd, VkBuffer vertexBuffer
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_noAttachmentRenderPass;
     rp.framebuffer = m_noAttachmentFramebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_collectPipeline);
 
     VkViewport vp{0, (float)m_height, (float)m_width, -(float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0,0}, {m_width, m_height}};
+    VkRect2D sc = { {0,0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_collectPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
@@ -735,6 +735,8 @@ void PPLLRenderer::recordCollectPhase(VkCommandBuffer cmd, VkBuffer vertexBuffer
         pc.model = glm::mat4(1.0f);
         pc.viewProj = viewProj;
         pc.objectID = obj.objectID;
+        pc.nearPlane = nearPlane;
+        pc.farPlane = farPlane;
         vkCmdPushConstants(cmd, m_collectPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
         vkCmdDrawIndexed(cmd, obj.indexCount, 1, obj.indexOffset, 0, 0);
     }
@@ -749,13 +751,13 @@ void PPLLRenderer::recordSortPhase(VkCommandBuffer cmd) {
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_noAttachmentRenderPass;
     rp.framebuffer = m_noAttachmentFramebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_sortPipeline);
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0,0}, {m_width, m_height}};
+    VkRect2D sc = { {0,0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
@@ -773,13 +775,13 @@ void PPLLRenderer::recordFindMinPhase(VkCommandBuffer cmd) {
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_noAttachmentRenderPass;
     rp.framebuffer = m_noAttachmentFramebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_findMinPipeline);
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0,0}, {m_width, m_height}};
+    VkRect2D sc = { {0,0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
@@ -796,13 +798,13 @@ void PPLLRenderer::recordSeedPhase(VkCommandBuffer cmd) {
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_noAttachmentRenderPass;
     rp.framebuffer = m_noAttachmentFramebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_seedPipeline);
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0,0}, {m_width, m_height}};
+    VkRect2D sc = { {0,0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
@@ -823,13 +825,13 @@ void PPLLRenderer::recordGrowPhase(VkCommandBuffer cmd) {
         VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         rp.renderPass = m_noAttachmentRenderPass;
         rp.framebuffer = m_noAttachmentFramebuffer;
-        rp.renderArea = {{0, 0}, {m_width, m_height}};
+        rp.renderArea = { {0, 0}, {m_width, m_height} };
         vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_growPipeline);
 
         VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
         vkCmdSetViewport(cmd, 0, 1, &vp);
-        VkRect2D sc = {{0,0}, {m_width, m_height}};
+        VkRect2D sc = { {0,0}, {m_width, m_height} };
         vkCmdSetScissor(cmd, 0, 1, &sc);
 
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
@@ -857,12 +859,12 @@ void PPLLRenderer::recordGrowPhase(VkCommandBuffer cmd) {
 
 void PPLLRenderer::recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex) {
     VkClearValue clear{};
-    clear.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    clear.color = { {0.0f, 0.0f, 0.0f, 0.0f} };
 
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_layerRenderPass;
     rp.framebuffer = m_layerImages[layerIndex].framebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     rp.clearValueCount = 1;
     rp.pClearValues = &clear;
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
@@ -870,7 +872,7 @@ void PPLLRenderer::recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex) 
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0,0}, {m_width, m_height}};
+    VkRect2D sc = { {0,0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
@@ -928,12 +930,12 @@ void PPLLRenderer::recordClearLabelsPhase(VkCommandBuffer cmd) {
 
 void PPLLRenderer::recordCompositePhase(VkCommandBuffer cmd, uint32_t swapchainImageIndex) {
     VkClearValue clear{};
-    clear.color = {{0.02f, 0.02f, 0.08f, 1.0f}};
+    clear.color = { {0.02f, 0.02f, 0.08f, 1.0f} };
 
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_compositeRenderPass;
     rp.framebuffer = m_compositeFramebuffers[swapchainImageIndex];
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     rp.clearValueCount = 1;
     rp.pClearValues = &clear;
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
@@ -941,7 +943,7 @@ void PPLLRenderer::recordCompositePhase(VkCommandBuffer cmd, uint32_t swapchainI
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0,0}, {m_width, m_height}};
+    VkRect2D sc = { {0,0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_compositePipelineLayout, 0, 1, &m_compositeDescSet, 0, nullptr);

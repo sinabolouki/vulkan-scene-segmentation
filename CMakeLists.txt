@@ -4,11 +4,11 @@ project(DepthPeelingRenderer LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ─── Find Vulkan ───
 find_package(Vulkan REQUIRED)
 find_package(glfw3 REQUIRED)
 find_package(glm REQUIRED)
 find_package(tinyobjloader REQUIRED)
+find_package(imgui REQUIRED)
 
 # add_subdirectory(external/glfw)
 add_subdirectory(vk-bootstrap)
@@ -27,6 +27,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     vk-bootstrap::vk-bootstrap
     glm::glm
     tinyobjloader::tinyobjloader
+    imgui::imgui
 )
 
 # ─── Shader compilation (custom target) ───

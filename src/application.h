@@ -23,6 +23,9 @@
 #include <string>
 #include <vector>
 
+#include "imgui_manager.h"
+#include <chrono>
+
 class Application {
 public:
     bool init(uint32_t width, uint32_t height, const std::string& title);
@@ -46,6 +49,13 @@ private:
 #elif defined(RENDER_METHOD_PPLL)
     PPLLRenderer m_renderer;
 #endif
+
+    ImGuiManager m_imguiManager;
+
+    // Frame timing
+    std::chrono::high_resolution_clock::time_point m_lastFrameTime;
+    double m_frameTimeMs = 0.0;
+    double m_fps = 0.0;
 
     // Scene
     Scene m_scene;
