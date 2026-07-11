@@ -215,6 +215,13 @@ void main() {
         outColor = debugFragCount(coord);
         return;
     }
+    if (targetLayer == 104u) {
+        // BYPASS TEST: Just output the first fragment's color (no union-find)
+        uint idx = imageLoad(headPointerImage, coord).r;
+        if (idx == NULL_IDX) { outColor = vec4(0.0); return; }
+        outColor = unpackColor(nodes[idx].color);
+        return;
+    }
 
     // Normal resolve
     outColor = normalResolve(coord, targetLayer);

@@ -32,7 +32,7 @@ layout(set = 0, binding = 2, std430) buffer AtomicCounter {
     uint counter;
 };
 
-layout(set = 0, binding = 3, std430) buffer ParentBuffer {
+layout(set = 0, binding = 3, std430) coherent buffer ParentBuffer {
     uint parent[];
 };
 

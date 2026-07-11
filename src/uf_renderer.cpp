@@ -861,6 +861,8 @@ void UFRenderer::recordCollectPhase(VkCommandBuffer cmd,
         pc.model = glm::mat4(1.0f);
         pc.viewProj = viewProj;
         pc.objectID = obj.objectID;
+        pc.nearPlane = nearPlane;
+        pc.farPlane = farPlane;
         vkCmdPushConstants(cmd, m_collectPipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(pc), &pc);

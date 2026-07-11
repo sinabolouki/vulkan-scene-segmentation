@@ -12,9 +12,9 @@
 
 bool ImGuiManager::init(VulkanContext& context, SwapchainManager& swapchain, GLFWwindow* window) {
     // Create descriptor pool for ImGui
-    std::array<VkDescriptorPoolSize, 1> poolSizes = {{
+    std::array<VkDescriptorPoolSize, 1> poolSizes = { {
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}
-    }};
+    } };
 
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
@@ -89,7 +89,7 @@ void ImGuiManager::render(VkCommandBuffer cmd, VkExtent2D extent, VkFramebuffer 
     VkRenderPassBeginInfo rpInfo{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rpInfo.renderPass = m_renderPass;
     rpInfo.framebuffer = framebuffer;
-    rpInfo.renderArea = {{0, 0}, extent};
+    rpInfo.renderArea = { {0, 0}, extent };
 
     vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmd);

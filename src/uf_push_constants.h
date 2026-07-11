@@ -8,7 +8,9 @@ struct UFScenePushConstants {
     glm::mat4 model;
     glm::mat4 viewProj;
     uint32_t  objectID;
-    float     padding[3];  // align to 16 bytes
+    float     nearPlane;   // ← was padding[0]
+    float     farPlane;    // ← was padding[1]
+    float     padding;  // align to 16 bytes
 };
 
 // Push constants for all fullscreen passes

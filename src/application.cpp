@@ -240,6 +240,9 @@ void Application::keyCallback(GLFWwindow *window, int key, int scancode, int act
         case GLFW_KEY_8:
             app->m_renderer.debugDisplayLayer = 103;
             break; // Frag count
+        case GLFW_KEY_9:
+            app->m_renderer.debugDisplayLayer = 104;
+            break; // Bypass test
         }
     }
 }
