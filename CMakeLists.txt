@@ -30,21 +30,45 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     imgui::imgui
 )
 
-# ─── Shader compilation (custom target) ───
-file(GLOB SHADER_FILES shaders/*.vert shaders/*.frag shaders/*.comp)
+# ─── Shader compilation (recursive, supports nested dirs) ───
+
+# Collect shaders from both shaders/ and assets/ (recursively)
+file(GLOB_RECURSE SHADER_FILES
+    shaders/*.vert
+    shaders/*.frag
+    shaders/*.comp
+)
+
+set(SPIRV_OUTPUTS "")
 
 foreach(SHADER ${SHADER_FILES})
-    get_filename_component(SHADER_NAME ${SHADER} NAME)
-    set(SPIRV_OUTPUT "${CMAKE_BINARY_DIR}/shaders/${SHADER_NAME}.spv")
+    # Get path relative to the source directory to preserve folder structure
+    file(RELATIVE_PATH SHADER_REL "${CMAKE_SOURCE_DIR}" "${SHADER}")
+
+    # Output: build/compiled_shaders/<relative_path>.spv
+    set(SPIRV_OUTPUT "${CMAKE_BINARY_DIR}/${SHADER_REL}.spv")
+
+    # Ensure the output subdirectory exists
+    get_filename_component(SPIRV_OUTPUT_DIR "${SPIRV_OUTPUT}" DIRECTORY)
+
     add_custom_command(
-        OUTPUT ${SPIRV_OUTPUT}
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/shaders"
-        COMMAND Vulkan::glslangValidator -V ${SHADER} -o ${SPIRV_OUTPUT}
-        DEPENDS ${SHADER}
-        COMMENT "Compiling ${SHADER_NAME} -> SPIR-V"
+        OUTPUT "${SPIRV_OUTPUT}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${SPIRV_OUTPUT_DIR}"
+        COMMAND Vulkan::glslangValidator -V "${SHADER}" -o "${SPIRV_OUTPUT}"
+        DEPENDS "${SHADER}"
+        COMMENT "Compiling shader: ${SHADER_REL} -> SPIR-V"
     )
-    list(APPEND SPIRV_OUTPUTS ${SPIRV_OUTPUT})
+    list(APPEND SPIRV_OUTPUTS "${SPIRV_OUTPUT}")
 endforeach()
 
 add_custom_target(compile_shaders ALL DEPENDS ${SPIRV_OUTPUTS})
 add_dependencies(${PROJECT_NAME} compile_shaders)
+
+add_custom_target(copy_assets ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/assets"
+        "${CMAKE_BINARY_DIR}/assets"
+    COMMENT "Copying assets/ to build directory"
+)
+
+add_dependencies(${PROJECT_NAME} copy_assets)

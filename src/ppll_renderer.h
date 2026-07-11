@@ -29,9 +29,9 @@ public:
     float farPlane = 100.0f;   // Far plane for depth normalization
 
     // Adjustable at runtime
-    float depthThreshold = 0.01f;       // Max depth difference for neighbor similarity
+    float depthThreshold = 0.015f;       // Max depth difference for neighbor similarity
     float colorThreshold = 0.15f;       // Max color distance for neighbor similarity
-    uint32_t growIterations = 100;       // Number of grow passes per layer
+    uint32_t growIterations = 1;       // Number of grow passes per layer
     int debugDisplayLayer = -1;         // -1 = composite all, 0-3 = show single layer
 
     // ─── Public Interface ───

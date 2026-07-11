@@ -1,8 +1,10 @@
 #pragma once
 
 // CHOOSE RENDERING METHOD (uncomment ONE):
-#define RENDER_METHOD_PPLL              // Per-Pixel Linked List
+// #define RENDER_METHOD_PPLL              // Per-Pixel Linked List
 // #define RENDER_METHOD_DEPTH_PEELING   // Depth Peeling
+#define RENDER_METHOD_UNION_FIND
+
 
 #include "vulkan_context.h"
 #include "swapchain_manager.h"
@@ -14,6 +16,8 @@
     #include "depth_peeling_renderer.h"
 #elif defined(RENDER_METHOD_PPLL)
     #include "ppll_renderer.h"
+#elif defined(RENDER_METHOD_UNION_FIND)
+    #include "uf_renderer.h"
 #else
     #error "No render method defined! Uncomment one in application.h"
 #endif
@@ -48,6 +52,8 @@ private:
     DepthPeelingRenderer m_renderer;
 #elif defined(RENDER_METHOD_PPLL)
     PPLLRenderer m_renderer;
+#elif defined(RENDER_METHOD_UNION_FIND)
+    UFRenderer m_renderer;
 #endif
 
     ImGuiManager m_imguiManager;

@@ -43,7 +43,7 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
         return false;
 
     // Scene
-    std::string scenePath = "../assets/circles16.obj";
+    std::string scenePath = "../assets/simple_scene.obj";
     if (!m_scene.loadFromOBJ(scenePath))
     {
         std::cerr << "Failed to load scene: " << scenePath << std::endl;
@@ -87,7 +87,7 @@ void Application::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex)
     glm::vec3 center = m_scene.getCenter();
     float radius = m_scene.getRadius();
     glm::vec3 eye = center + glm::vec3(0.0f, radius * 0.5f, radius * 2.0f);
-    eye = center + glm::vec3(1.5f, 1.0f, 0.0f) * radius; // Slightly offset for better view
+    eye = center + glm::vec3(1.5f, 0.5f, 0.0f) * radius; // Slightly offset for better view
     glm::mat4 view = glm::lookAt(eye, center, glm::vec3(0.0f, 1.0f, 0.0f));
     m_renderer.nearPlane = 0.01f;
     m_renderer.farPlane = radius * 10.0f;
@@ -127,12 +127,14 @@ void Application::drawFrame()
     ImGui::Separator();
     ImGui::SliderFloat("Depth Threshold", &m_renderer.depthThreshold, 0.001f, 0.1f, "%.4f");
     ImGui::SliderFloat("Color Threshold", &m_renderer.colorThreshold, 0.01f, 0.5f, "%.3f");
+#ifdef RENDER_METHOD_PPLL
     int grow = (int)m_renderer.growIterations;
     ImGui::SliderInt("Grow Iterations", &grow, 1, 100);
     m_renderer.growIterations = (uint32_t)grow;
+#endif
     ImGui::Separator();
-    const char* layerNames[] = {"Composite", "Layer 0", "Layer 1", "Layer 2", "Layer 3"};
-    int layerIdx = m_renderer.debugDisplayLayer + 1;  // -1 → 0, 0→1, etc.
+    const char *layerNames[] = {"Composite", "Layer 0", "Layer 1", "Layer 2", "Layer 3"};
+    int layerIdx = m_renderer.debugDisplayLayer + 1; // -1 → 0, 0→1, etc.
     ImGui::Combo("Display", &layerIdx, layerNames, 5);
     m_renderer.debugDisplayLayer = layerIdx - 1;
     ImGui::End();
@@ -205,39 +207,40 @@ void Application::keyCallback(GLFWwindow *window, int key, int scancode, int act
 
     auto app = reinterpret_cast<Application *>(glfwGetWindowUserPointer(window));
 
-    switch (key)
+    // Inside keyCallback:
+    if (action == GLFW_PRESS || action == GLFW_REPEAT)
     {
-    case GLFW_KEY_0:
-        app->m_renderer.debugDisplayLayer = -1;
-        std::cout << "[Debug] Showing: COMPOSITE (all layers)" << std::endl;
-        break;
-    case GLFW_KEY_1:
-        app->m_renderer.debugDisplayLayer = 0;
-        std::cout << "[Debug] Showing: Layer 0 (nearest)" << std::endl;
-        break;
-    case GLFW_KEY_2:
-        app->m_renderer.debugDisplayLayer = 1;
-        std::cout << "[Debug] Showing: Layer 1" << std::endl;
-        break;
-    case GLFW_KEY_3:
-        app->m_renderer.debugDisplayLayer = 2;
-        std::cout << "[Debug] Showing: Layer 2" << std::endl;
-        break;
-    case GLFW_KEY_4:
-        app->m_renderer.debugDisplayLayer = 3;
-        std::cout << "[Debug] Showing: Layer 3 (farthest)" << std::endl;
-        break;
-    case GLFW_KEY_EQUAL: // + key
-        app->m_renderer.depthThreshold *= 1.5f;
-        std::cout << "[Debug] Threshold: " << app->m_renderer.depthThreshold << std::endl;
-        break;
-    case GLFW_KEY_MINUS:
-        app->m_renderer.depthThreshold *= 0.66f;
-        std::cout << "[Debug] Threshold: " << app->m_renderer.depthThreshold << std::endl;
-        break;
-    case GLFW_KEY_ESCAPE:
-        glfwSetWindowShouldClose(window, GLFW_TRUE);
-        break;
+        auto *app = reinterpret_cast<Application *>(glfwGetWindowUserPointer(window));
+        switch (key)
+        {
+        case GLFW_KEY_0:
+            app->m_renderer.debugDisplayLayer = -1;
+            break; // Normal
+        case GLFW_KEY_1:
+            app->m_renderer.debugDisplayLayer = 0;
+            break; // Layer 0
+        case GLFW_KEY_2:
+            app->m_renderer.debugDisplayLayer = 1;
+            break; // Layer 1
+        case GLFW_KEY_3:
+            app->m_renderer.debugDisplayLayer = 2;
+            break; // Layer 2
+        case GLFW_KEY_4:
+            app->m_renderer.debugDisplayLayer = 3;
+            break; // Layer 3
+        case GLFW_KEY_5:
+            app->m_renderer.debugDisplayLayer = 100;
+            break; // Root colors
+        case GLFW_KEY_6:
+            app->m_renderer.debugDisplayLayer = 101;
+            break; // Root count
+        case GLFW_KEY_7:
+            app->m_renderer.debugDisplayLayer = 102;
+            break; // Depth
+        case GLFW_KEY_8:
+            app->m_renderer.debugDisplayLayer = 103;
+            break; // Frag count
+        }
     }
 }
 
