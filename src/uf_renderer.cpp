@@ -46,6 +46,7 @@ void UFRenderer::destroy(VkDevice device) {
     vkDestroyPipeline(device, m_initParentsPipeline, nullptr);
     vkDestroyPipeline(device, m_mergePipeline, nullptr);
     vkDestroyPipeline(device, m_compressPipeline, nullptr);
+    vkDestroyPipeline(device, m_registerRootsPipeline, nullptr);
     vkDestroyPipeline(device, m_resolvePipeline, nullptr);
     vkDestroyPipeline(device, m_compositePipeline, nullptr);
 
@@ -135,6 +136,11 @@ bool UFRenderer::createDataStructures(VulkanContext& context) {
     if (!createBuffer(context, m_nodeCapacity * sizeof(uint32_t),
                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                       m_parentBuffer, m_parentBufferMemory)) return false;
+
+    // Root table (8 entries × 2 uints = 64 bytes)
+    if (!createBuffer(context, MAX_GLOBAL_ROOTS * 2 * sizeof(uint32_t),
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      m_rootTableBuffer, m_rootTableBufferMemory)) return false;
 
     return true;
 }
@@ -292,17 +298,14 @@ bool UFRenderer::createSampler(VkDevice device) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 bool UFRenderer::createDescriptorSetLayouts(VkDevice device) {
-    // PPLL set: 4 bindings
+    // PPLL set: 5 bindings
     {
-        std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
-        // binding 0: head pointer image (storage image, r32ui)
+        std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
         bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-        // binding 1: node buffer (storage buffer)
         bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-        // binding 2: atomic counter (storage buffer)
         bindings[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-        // binding 3: parent buffer (storage buffer)
         bindings[3] = {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        bindings[4] = {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
 
         VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         info.bindingCount = (uint32_t)bindings.size();
@@ -333,14 +336,14 @@ bool UFRenderer::createDescriptorSetLayouts(VkDevice device) {
 
 bool UFRenderer::createDescriptorPool(VkDevice device) {
     std::array<VkDescriptorPoolSize, 3> sizes{};
-    sizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1};        // head pointer
-    sizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3};       // nodes + counter + parent
-    sizes[2] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NUM_LAYERS};  // layer textures
+    sizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1};
+    sizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};  // nodes + counter + parent + rootTable
+    sizes[2] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NUM_LAYERS};
 
     VkDescriptorPoolCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     info.poolSizeCount = (uint32_t)sizes.size();
     info.pPoolSizes = sizes.data();
-    info.maxSets = 2;  // ppll set + composite set
+    info.maxSets = 2;
     return vkCreateDescriptorPool(device, &info, nullptr, &m_descriptorPool) == VK_SUCCESS;
 }
 
@@ -360,8 +363,9 @@ bool UFRenderer::createDescriptorSets(VkDevice device) {
         VkDescriptorBufferInfo nodeInfo{m_nodeBuffer, 0, VK_WHOLE_SIZE};
         VkDescriptorBufferInfo counterInfo{m_atomicCounterBuffer, 0, sizeof(uint32_t)};
         VkDescriptorBufferInfo parentInfo{m_parentBuffer, 0, VK_WHOLE_SIZE};
+        VkDescriptorBufferInfo rootTableInfo{m_rootTableBuffer, 0, VK_WHOLE_SIZE};
 
-        std::array<VkWriteDescriptorSet, 4> writes{};
+        std::array<VkWriteDescriptorSet, 5> writes{};
 
         writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         writes[0].dstSet = m_ppllDescSet; writes[0].dstBinding = 0;
@@ -383,10 +387,15 @@ bool UFRenderer::createDescriptorSets(VkDevice device) {
         writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[3].descriptorCount = 1; writes[3].pBufferInfo = &parentInfo;
 
+        writes[4] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[4].dstSet = m_ppllDescSet; writes[4].dstBinding = 4;
+        writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[4].descriptorCount = 1; writes[4].pBufferInfo = &rootTableInfo;
+
         vkUpdateDescriptorSets(device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
     }
 
-    // Composite descriptor set
+    // Composite descriptor set (unchanged)
     {
         VkDescriptorSetAllocateInfo alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
         alloc.descriptorPool = m_descriptorPool;
@@ -464,18 +473,19 @@ bool UFRenderer::createPipelineLayouts(VkDevice device) {
 bool UFRenderer::createPipelines(VkDevice device) {
     std::string sd = "shaders/union_find";
 
-    VkShaderModule collectVert    = ShaderUtils::createShaderModule(device, sd + "/uf_collect.vert.spv");
-    VkShaderModule collectFrag    = ShaderUtils::createShaderModule(device, sd + "/uf_collect.frag.spv");
-    VkShaderModule fullscreenVert = ShaderUtils::createShaderModule(device, sd + "/uf_fullscreen.vert.spv");
-    VkShaderModule sortFrag       = ShaderUtils::createShaderModule(device, sd + "/uf_sort.frag.spv");
-    VkShaderModule initFrag       = ShaderUtils::createShaderModule(device, sd + "/uf_init_parents.frag.spv");
-    VkShaderModule mergeFrag      = ShaderUtils::createShaderModule(device, sd + "/uf_merge.frag.spv");
-    VkShaderModule compressFrag   = ShaderUtils::createShaderModule(device, sd + "/uf_compress.frag.spv");
-    VkShaderModule resolveFrag    = ShaderUtils::createShaderModule(device, sd + "/uf_resolve.frag.spv");
-    VkShaderModule compositeFrag  = ShaderUtils::createShaderModule(device, sd + "/uf_composite.frag.spv");
+    VkShaderModule collectVert      = ShaderUtils::createShaderModule(device, sd + "/uf_collect.vert.spv");
+    VkShaderModule collectFrag      = ShaderUtils::createShaderModule(device, sd + "/uf_collect.frag.spv");
+    VkShaderModule fullscreenVert   = ShaderUtils::createShaderModule(device, sd + "/uf_fullscreen.vert.spv");
+    VkShaderModule sortFrag         = ShaderUtils::createShaderModule(device, sd + "/uf_sort.frag.spv");
+    VkShaderModule initFrag         = ShaderUtils::createShaderModule(device, sd + "/uf_init_parents.frag.spv");
+    VkShaderModule mergeFrag        = ShaderUtils::createShaderModule(device, sd + "/uf_merge.frag.spv");
+    VkShaderModule compressFrag     = ShaderUtils::createShaderModule(device, sd + "/uf_compress.frag.spv");
+    VkShaderModule registerFrag     = ShaderUtils::createShaderModule(device, sd + "/uf_register_roots.frag.spv");
+    VkShaderModule resolveFrag      = ShaderUtils::createShaderModule(device, sd + "/uf_resolve.frag.spv");
+    VkShaderModule compositeFrag    = ShaderUtils::createShaderModule(device, sd + "/uf_composite.frag.spv");
 
     if (!collectVert || !collectFrag || !fullscreenVert || !sortFrag ||
-        !initFrag || !mergeFrag || !compressFrag || !resolveFrag || !compositeFrag) {
+        !initFrag || !mergeFrag || !compressFrag || !registerFrag || !resolveFrag || !compositeFrag) {
         std::cerr << "[UF] Failed to load one or more shaders!" << std::endl;
         return false;
     }
@@ -484,7 +494,7 @@ bool UFRenderer::createPipelines(VkDevice device) {
     auto vtxAttr = Vertex::getAttributeDescriptions();
     PipelineBuilder b;
 
-    // ─── Collect: geometry → PPLL ───
+    // ─── Collect ───
     m_collectPipeline = b
         .setVertexShader(collectVert).setFragmentShader(collectFrag)
         .setVertexInput({vtxBind}, vtxAttr)
@@ -495,7 +505,7 @@ bool UFRenderer::createPipelines(VkDevice device) {
         .setRenderPass(m_noAttachmentRenderPass, 0).build(device);
     if (!m_collectPipeline) return false;
 
-    // ─── Sort: bubble sort linked lists ───
+    // ─── Sort ───
     b.clear();
     m_sortPipeline = b
         .setVertexShader(fullscreenVert).setFragmentShader(sortFrag)
@@ -506,7 +516,7 @@ bool UFRenderer::createPipelines(VkDevice device) {
         .setRenderPass(m_noAttachmentRenderPass, 0).build(device);
     if (!m_sortPipeline) return false;
 
-    // ─── Init Parents: parent[i] = i ───
+    // ─── Init Parents ───
     b.clear();
     m_initParentsPipeline = b
         .setVertexShader(fullscreenVert).setFragmentShader(initFrag)
@@ -517,7 +527,7 @@ bool UFRenderer::createPipelines(VkDevice device) {
         .setRenderPass(m_noAttachmentRenderPass, 0).build(device);
     if (!m_initParentsPipeline) return false;
 
-    // ─── Merge: compare neighbors, Union() ───
+    // ─── Merge ───
     b.clear();
     m_mergePipeline = b
         .setVertexShader(fullscreenVert).setFragmentShader(mergeFrag)
@@ -528,7 +538,7 @@ bool UFRenderer::createPipelines(VkDevice device) {
         .setRenderPass(m_noAttachmentRenderPass, 0).build(device);
     if (!m_mergePipeline) return false;
 
-    // ─── Compress: path compression ───
+    // ─── Compress ───
     b.clear();
     m_compressPipeline = b
         .setVertexShader(fullscreenVert).setFragmentShader(compressFrag)
@@ -539,7 +549,18 @@ bool UFRenderer::createPipelines(VkDevice device) {
         .setRenderPass(m_noAttachmentRenderPass, 0).build(device);
     if (!m_compressPipeline) return false;
 
-    // ─── Resolve: output N-th distinct root to layer color ───
+    // ─── Register Roots ───
+    b.clear();
+    m_registerRootsPipeline = b
+        .setVertexShader(fullscreenVert).setFragmentShader(registerFrag)
+        .setNoVertexInput().setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .setCullMode(VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE)
+        .disableDepthTest().setNoColorAttachments()
+        .setPipelineLayout(m_fullscreenPipelineLayout)
+        .setRenderPass(m_noAttachmentRenderPass, 0).build(device);
+    if (!m_registerRootsPipeline) return false;
+
+    // ─── Resolve ───
     b.clear();
     m_resolvePipeline = b
         .setVertexShader(fullscreenVert).setFragmentShader(resolveFrag)
@@ -550,7 +571,7 @@ bool UFRenderer::createPipelines(VkDevice device) {
         .setRenderPass(m_layerRenderPass, 0).build(device);
     if (!m_resolvePipeline) return false;
 
-    // ─── Composite: blend layers → swapchain ───
+    // ─── Composite ───
     b.clear();
     m_compositePipeline = b
         .setVertexShader(fullscreenVert).setFragmentShader(compositeFrag)
@@ -569,10 +590,11 @@ bool UFRenderer::createPipelines(VkDevice device) {
     vkDestroyShaderModule(device, initFrag, nullptr);
     vkDestroyShaderModule(device, mergeFrag, nullptr);
     vkDestroyShaderModule(device, compressFrag, nullptr);
+    vkDestroyShaderModule(device, registerFrag, nullptr);
     vkDestroyShaderModule(device, resolveFrag, nullptr);
     vkDestroyShaderModule(device, compositeFrag, nullptr);
 
-    std::cout << "[UF] 7 pipelines created." << std::endl;
+    std::cout << "[UF] 8 pipelines created." << std::endl;
     return true;
 }
 
@@ -680,25 +702,24 @@ uint32_t UFRenderer::findMemoryType(VkPhysicalDevice physDevice, uint32_t typeFi
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void UFRenderer::destroySizeDependent(VkDevice device) {
-    // Head pointer
     if (m_headPointerView)   { vkDestroyImageView(device, m_headPointerView, nullptr); m_headPointerView = VK_NULL_HANDLE; }
     if (m_headPointerImage)  { vkDestroyImage(device, m_headPointerImage, nullptr); m_headPointerImage = VK_NULL_HANDLE; }
     if (m_headPointerMemory) { vkFreeMemory(device, m_headPointerMemory, nullptr); m_headPointerMemory = VK_NULL_HANDLE; }
 
-    // Node buffer
     if (m_nodeBuffer)       { vkDestroyBuffer(device, m_nodeBuffer, nullptr); m_nodeBuffer = VK_NULL_HANDLE; }
     if (m_nodeBufferMemory) { vkFreeMemory(device, m_nodeBufferMemory, nullptr); m_nodeBufferMemory = VK_NULL_HANDLE; }
     m_nodeCapacity = 0;
 
-    // Atomic counter
     if (m_atomicCounterBuffer) { vkDestroyBuffer(device, m_atomicCounterBuffer, nullptr); m_atomicCounterBuffer = VK_NULL_HANDLE; }
     if (m_atomicCounterMemory) { vkFreeMemory(device, m_atomicCounterMemory, nullptr); m_atomicCounterMemory = VK_NULL_HANDLE; }
 
-    // Parent buffer
     if (m_parentBuffer)       { vkDestroyBuffer(device, m_parentBuffer, nullptr); m_parentBuffer = VK_NULL_HANDLE; }
     if (m_parentBufferMemory) { vkFreeMemory(device, m_parentBufferMemory, nullptr); m_parentBufferMemory = VK_NULL_HANDLE; }
 
-    // Layer images
+    // Root table
+    if (m_rootTableBuffer)       { vkDestroyBuffer(device, m_rootTableBuffer, nullptr); m_rootTableBuffer = VK_NULL_HANDLE; }
+    if (m_rootTableBufferMemory) { vkFreeMemory(device, m_rootTableBufferMemory, nullptr); m_rootTableBufferMemory = VK_NULL_HANDLE; }
+
     for (auto& layer : m_layerImages) {
         if (layer.framebuffer) { vkDestroyFramebuffer(device, layer.framebuffer, nullptr); layer.framebuffer = VK_NULL_HANDLE; }
         if (layer.view)        { vkDestroyImageView(device, layer.view, nullptr); layer.view = VK_NULL_HANDLE; }
@@ -707,7 +728,6 @@ void UFRenderer::destroySizeDependent(VkDevice device) {
     }
     m_layerImages.clear();
 
-    // Framebuffers
     if (m_noAttachmentFramebuffer) { vkDestroyFramebuffer(device, m_noAttachmentFramebuffer, nullptr); m_noAttachmentFramebuffer = VK_NULL_HANDLE; }
     for (auto fb : m_compositeFramebuffers)
         vkDestroyFramebuffer(device, fb, nullptr);
@@ -726,46 +746,54 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
                                 const std::vector<SceneObject>& objects,
                                 const glm::mat4& viewProj,
                                 uint32_t swapchainImageIndex) {
-    // Phase 1: Clear head pointers + atomic counter
     recordClearPhase(cmd);
 
-    // Phase 2: Collect — rasterize all geometry into PPLL
     recordCollectPhase(cmd, vertexBuffer, indexBuffer, objects, viewProj);
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-    // Phase 3: Sort — sort each pixel's linked list front-to-back
     recordSortPhase(cmd);
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-    // Phase 4: Init parents — parent[i] = i for all allocated fragments
     recordInitParentsPhase(cmd);
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-    // Phase 5: Merge — compare with all neighbor fragments, Union() if similar
     recordMergePhase(cmd);
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-    // Phase 6: Compress — path compression so parent[i] = root
     recordCompressPhase(cmd);
+    recordMemoryBarrier(cmd,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+    // ─── Clear root table to 0xFFFFFFFF ───
+    // ─── Clear root table ───
+    // First half (rootIDs): fill with 0xFFFFFFFF (empty sentinel)
+    vkCmdFillBuffer(cmd, m_rootTableBuffer, 0,
+                    MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0xFFFFFFFF);
+    // Second half (maxDepths): fill with 0 (atomicMax grows from 0)
+    vkCmdFillBuffer(cmd, m_rootTableBuffer, MAX_GLOBAL_ROOTS * sizeof(uint32_t),
+                    MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0);
+    recordMemoryBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+    // ─── Register global roots ───
+    recordRegisterRootsPhase(cmd);
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 
-    // Phase 7: Resolve — for each layer, output the N-th distinct root's color
+    // ─── Resolve layers ───
     for (uint32_t layer = 0; layer < NUM_LAYERS; layer++) {
         recordResolvePhase(cmd, layer);
-
-        // Barrier: layer image written → ready for composite to sample
-        // (The render pass transition handles layout, but we need a memory barrier
-        //  between resolve passes since they all read the same PPLL data)
         if (layer < NUM_LAYERS - 1) {
             recordMemoryBarrier(cmd,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -773,12 +801,10 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
         }
     }
 
-    // Barrier before composite reads all layer textures
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 
-    // Phase 8: Composite — blend all layers back-to-front onto swapchain
     recordCompositePhase(cmd, swapchainImageIndex);
 }
 
@@ -990,6 +1016,36 @@ void UFRenderer::recordCompressPhase(VkCommandBuffer cmd) {
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
     VkRect2D sc = { {0, 0}, {m_width, m_height} };
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
+
+    UFFullscreenPushConstants pc{};
+    pc.depthThreshold = depthThreshold;
+    pc.colorThreshold = colorThreshold;
+    pc.screenWidth = m_width;
+    pc.screenHeight = m_height;
+    pc.targetLayer = 0;
+    vkCmdPushConstants(cmd, m_fullscreenPipelineLayout,
+                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+}
+
+void UFRenderer::recordRegisterRootsPhase(VkCommandBuffer cmd) {
+    VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rp.renderPass = m_noAttachmentRenderPass;
+    rp.framebuffer = m_noAttachmentFramebuffer;
+    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_registerRootsPipeline);
+
+    VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    VkRect2D sc = {{0, 0}, {m_width, m_height}};
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,

@@ -24,6 +24,7 @@ public:
     static constexpr uint32_t MAX_FRAGS_PER_PIXEL = 32;
     static constexpr uint32_t NUM_LAYERS = 4;
     static constexpr uint32_t UF_NULL = 0xFFFFFFFF;
+    static constexpr uint32_t MAX_GLOBAL_ROOTS = 8;
 
     // Runtime parameters (adjustable via ImGui)
     float depthThreshold = 0.02f;
@@ -94,6 +95,9 @@ private:
     // Phase 6: Path compression — parent[i] = root of tree containing i
     void recordCompressPhase(VkCommandBuffer cmd);
 
+    // Phase 6.5: Register all unique roots with their max depth
+    void recordRegisterRootsPhase(VkCommandBuffer cmd);
+
     // Phase 7 (per layer): Walk sorted list, output N-th distinct root's color
     void recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex);
 
@@ -154,6 +158,10 @@ private:
     // After compress: parent[i] = root of connected component
     VkBuffer       m_parentBuffer       = VK_NULL_HANDLE;
     VkDeviceMemory m_parentBufferMemory = VK_NULL_HANDLE;
+
+    // Global root table (SSBO): 8 entries × {rootID, maxDepth} = 64 bytes
+    VkBuffer       m_rootTableBuffer       = VK_NULL_HANDLE;
+    VkDeviceMemory m_rootTableBufferMemory = VK_NULL_HANDLE;
 
     // ═══════════════════════════════════════════════════════════
     // LAYER COLOR IMAGES (one per output layer)
@@ -242,4 +250,5 @@ private:
     VkPipeline m_compressPipeline    = VK_NULL_HANDLE;  // Path compression
     VkPipeline m_resolvePipeline     = VK_NULL_HANDLE;  // Root → layer color
     VkPipeline m_compositePipeline   = VK_NULL_HANDLE;  // Blend layers
+    VkPipeline m_registerRootsPipeline = VK_NULL_HANDLE;  // Register global roots
 };
