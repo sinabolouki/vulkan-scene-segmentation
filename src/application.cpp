@@ -43,8 +43,8 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
         return false;
 
     // Scene
-    // std::string scenePath = "../assets/circles16.obj";
-    std::string scenePath = "../assets/simple_scene.obj";
+    std::string scenePath = "../assets/circles16.obj";
+    // std::string scenePath = "../assets/simple_scene.obj";
     if (!m_scene.loadFromOBJ(scenePath))
     {
         std::cerr << "Failed to load scene: " << scenePath << std::endl;
@@ -123,28 +123,54 @@ void Application::drawFrame()
     m_imguiManager.beginFrame();
 
     // ─── ImGui UI ───
-    #ifdef RENDER_METHOD_PPLL
-    ImGui::Begin("PPLL Renderer");
-    #elif defined(RENDER_METHOD_UNION_FIND)
+    #ifdef RENDER_METHOD_UNION_FIND
     ImGui::Begin("Union-Find Renderer");
-    #elif defined(RENDER_METHOD_DEPTH_PEELING)
-    ImGui::Begin("Depth Peeling Renderer");
-    #endif
+    ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameTimeMs);
+    ImGui::Separator();
+
+    if (m_renderer.enableTiming) {
+        auto& t = m_renderer.timingResults;
+        ImGui::Text("GPU Timing (ms):");
+        ImGui::Text("  Clear:       %6.3f", t.clear);
+        ImGui::Text("  Collect:     %6.3f", t.collect);
+        ImGui::Text("  Sort:        %6.3f", t.sort);
+        ImGui::Text("  Init Parents:%6.3f", t.initParents);
+        ImGui::Text("  Merge:       %6.3f", t.merge);
+        ImGui::Text("  Compress:    %6.3f", t.compress);
+        ImGui::Text("  ──────────────────");
+        for (uint32_t i = 0; i < 4; i++) {
+            ImGui::Text("  Peel %d:      %6.3f", i, t.peels[i]);
+        }
+        ImGui::Text("  Peels Total: %6.3f", t.peelTotal);
+        ImGui::Text("  ──────────────────");
+        ImGui::Text("  Composite:   %6.3f", t.composite);
+        ImGui::Text("  ══════════════════");
+        ImGui::Text("  TOTAL:       %6.3f", t.total);
+    }
+    ImGui::Checkbox("Enable GPU Timing", &m_renderer.enableTiming);
+
+    ImGui::Separator();
+    const char *layerNames[] = {"Composite", "Layer 0", "Layer 1", "Layer 2", "Layer 3"};
+    int layerIdx = m_renderer.debugDisplayLayer + 1;
+    ImGui::Combo("Display", &layerIdx, layerNames, 5);
+    m_renderer.debugDisplayLayer = layerIdx - 1;
+    ImGui::End();
+#elif defined(RENDER_METHOD_PPLL)
+    ImGui::Begin("PPLL Renderer");
     ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameTimeMs);
     ImGui::Separator();
     //ImGui::SliderFloat("Depth Threshold", &m_renderer.depthThreshold, 0.001f, 0.1f, "%.4f");
     //ImGui::SliderFloat("Color Threshold", &m_renderer.colorThreshold, 0.01f, 0.5f, "%.3f");
-#ifdef RENDER_METHOD_PPLL
     int grow = (int)m_renderer.growIterations;
     ImGui::SliderInt("Grow Iterations", &grow, 1, 100);
     m_renderer.growIterations = (uint32_t)grow;
-#endif
     ImGui::Separator();
     const char *layerNames[] = {"Composite", "Layer 0", "Layer 1", "Layer 2", "Layer 3"};
     int layerIdx = m_renderer.debugDisplayLayer + 1; // -1 → 0, 0→1, etc.
     ImGui::Combo("Display", &layerIdx, layerNames, 5);
     m_renderer.debugDisplayLayer = layerIdx - 1;
     ImGui::End();
+#endif
     // ─── End ImGui UI ───
 
     VkDevice device = m_context.device;

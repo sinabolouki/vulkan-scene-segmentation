@@ -29,6 +29,18 @@ bool UFRenderer::init(VulkanContext& context, SwapchainManager& swapchain) {
     if (!createPipelineLayouts(context.device)) return false;
     if (!createPipelines(context.device)) return false;
 
+    if (enableTiming) {
+        VkQueryPoolCreateInfo qpInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        qpInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qpInfo.queryCount = MAX_TIMESTAMPS;
+        vkCreateQueryPool(context.device, &qpInfo, nullptr, &m_timestampQueryPool);
+
+        // Get timestamp period (nanoseconds per tick)
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(context.physical_device, &props);
+        m_timestampPeriod = props.limits.timestampPeriod;
+    }
+
     std::cout << "[UF] Initialized: " << m_width << "x" << m_height
               << ", " << NUM_LAYERS << " layers, "
               << m_nodeCapacity << " nodes ("
@@ -63,6 +75,8 @@ void UFRenderer::destroy(VkDevice device) {
     vkDestroyRenderPass(device, m_noAttachmentRenderPass, nullptr);
     vkDestroyRenderPass(device, m_layerRenderPass, nullptr);
     vkDestroyRenderPass(device, m_compositeRenderPass, nullptr);
+
+    if (m_timestampQueryPool) vkDestroyQueryPool(device, m_timestampQueryPool, nullptr);
 
     destroySizeDependent(device);
 }
@@ -746,37 +760,71 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
                                 const std::vector<SceneObject>& objects,
                                 const glm::mat4& viewProj,
                                 uint32_t swapchainImageIndex) {
+
+    // Read previous frame's timestamps (if available)
+    if (enableTiming && m_timingReady) {
+        uint64_t results[MAX_TIMESTAMPS];
+        VkResult res = vkGetQueryPoolResults(context.device, m_timestampQueryPool,
+            0, m_timestampCount, sizeof(results), results, sizeof(uint64_t),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+        if (res == VK_SUCCESS) {
+            memcpy(m_timestamps, results, sizeof(uint64_t) * m_timestampCount);
+            computeTimingResults();
+        }
+    }
+
+    m_timestampCount = 0;
+
+    // Reset queries for this frame
+    if (enableTiming) {
+        vkCmdResetQueryPool(cmd, m_timestampQueryPool, 0, MAX_TIMESTAMPS);
+    }
+
+    auto stamp = [&]() {
+        if (enableTiming && m_timestampCount < MAX_TIMESTAMPS) {
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                m_timestampQueryPool, m_timestampCount++);
+        }
+    };
+
     // ─── One-time setup passes ───
+    stamp(); // [0] start
+
     recordClearPhase(cmd);
+    stamp(); // [1] after clear
 
     recordCollectPhase(cmd, vertexBuffer, indexBuffer, objects, viewProj);
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    stamp(); // [2] after collect
 
     recordSortPhase(cmd);
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    stamp(); // [3] after sort
 
     recordInitParentsPhase(cmd);
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    stamp(); // [4] after init parents
 
     recordMergePhase(cmd);
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    stamp(); // [5] after merge
 
     recordCompressPhase(cmd);
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    stamp(); // [6] after compress
 
     // ─── Peel loop ───
     for (uint32_t peel = 0; peel < NUM_LAYERS; peel++) {
-        // Clear root table
         vkCmdFillBuffer(cmd, m_rootTableBuffer, 0,
                         MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0xFFFFFFFF);
         vkCmdFillBuffer(cmd, m_rootTableBuffer, MAX_GLOBAL_ROOTS * sizeof(uint32_t),
@@ -785,19 +833,19 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-        // Register roots from remaining list
         recordRegisterRootsPhase(cmd);
         recordMemoryBarrier(cmd,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-        // Resolve + advance head pointer
         recordResolvePhase(cmd, peel);
         recordMemoryBarrier(cmd,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+        stamp(); // [7], [8], [9], [10] after each peel
     }
 
     // ─── Composite ───
@@ -806,6 +854,9 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 
     recordCompositePhase(cmd, swapchainImageIndex);
+    stamp(); // [11] after composite
+
+    m_timingReady = true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1038,14 +1089,14 @@ void UFRenderer::recordRegisterRootsPhase(VkCommandBuffer cmd) {
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_noAttachmentRenderPass;
     rp.framebuffer = m_noAttachmentFramebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_registerRootsPipeline);
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0, 0}, {m_width, m_height}};
+    VkRect2D sc = { {0, 0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1159,4 +1210,31 @@ void UFRenderer::recordMemoryBarrier(VkCommandBuffer cmd,
     barrier.srcAccessMask = srcAccess;
     barrier.dstAccessMask = dstAccess;
     vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+}
+
+void UFRenderer::computeTimingResults() {
+    auto ms = [&](uint32_t start, uint32_t end) -> float {
+        if (end >= m_timestampCount || start >= m_timestampCount) {
+            return 0.0f;
+        }
+        uint64_t diff = m_timestamps[end] - m_timestamps[start];
+        return float(diff) * m_timestampPeriod / 1000000.0f; // ticks → ns → ms
+    };
+
+    timingResults.clear     = ms(0, 1);
+    timingResults.collect   = ms(1, 2);
+    timingResults.sort      = ms(2, 3);
+    timingResults.initParents = ms(3, 4);
+    timingResults.merge     = ms(4, 5);
+    timingResults.compress  = ms(5, 6);
+
+    // Peels: timestamps 6→7, 7→8, 8→9, 9→10
+    timingResults.peelTotal = 0;
+    for (uint32_t i = 0; i < NUM_LAYERS; i++) {
+        timingResults.peels[i] = ms(6 + i, 7 + i);
+        timingResults.peelTotal += timingResults.peels[i];
+    }
+
+    timingResults.composite = ms(6 + NUM_LAYERS, 7 + NUM_LAYERS);
+    timingResults.total     = ms(0, m_timestampCount - 1);
 }

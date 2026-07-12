@@ -25,6 +25,7 @@ public:
     static constexpr uint32_t NUM_LAYERS = 4;
     static constexpr uint32_t UF_NULL = 0xFFFFFFFF;
     static constexpr uint32_t MAX_GLOBAL_ROOTS = 128;
+    static constexpr uint32_t MAX_TIMESTAMPS = 20;
 
     // Runtime parameters (adjustable via ImGui)
     float depthThreshold = 0.02f;
@@ -33,6 +34,21 @@ public:
 
     float nearPlane = 0.1f;
     float farPlane = 100.0f;
+
+     struct TimingResults {
+        float clear = 0;
+        float collect = 0;
+        float sort = 0;
+        float initParents = 0;
+        float merge = 0;
+        float compress = 0;
+        float peelTotal = 0;
+        float peels[NUM_LAYERS] = {};  // per-peel (register + resolve)
+        float composite = 0;
+        float total = 0;
+    };
+    TimingResults timingResults;
+    bool enableTiming = true;
 
     // ─── Public Interface ───
     bool init(VulkanContext& context, SwapchainManager& swapchain);
@@ -47,7 +63,6 @@ public:
                         const std::vector<SceneObject>& objects,
                         const glm::mat4& viewProj,
                         uint32_t swapchainImageIndex);
-
 
     // ─── Debug Info ───
     uint32_t getNodeBufferCapacity() const { return m_nodeCapacity; }
@@ -122,6 +137,8 @@ private:
 
     uint32_t findMemoryType(VkPhysicalDevice physDevice, uint32_t typeFilter,
                             VkMemoryPropertyFlags properties);
+
+    void computeTimingResults();
 
     void destroySizeDependent(VkDevice device);
 
@@ -251,4 +268,11 @@ private:
     VkPipeline m_resolvePipeline     = VK_NULL_HANDLE;  // Root → layer color
     VkPipeline m_compositePipeline   = VK_NULL_HANDLE;  // Blend layers
     VkPipeline m_registerRootsPipeline = VK_NULL_HANDLE;  // Register global roots
+
+    //TIMESTAMPING
+    VkQueryPool m_timestampQueryPool = VK_NULL_HANDLE;
+    float       m_timestampPeriod = 0.0f;  // nanoseconds per tick
+    uint64_t    m_timestamps[MAX_TIMESTAMPS] = {};
+    uint32_t    m_timestampCount = 0;
+    bool        m_timingReady = false;
 };
