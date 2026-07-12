@@ -2,7 +2,7 @@
 
 #define NULL_IDX         0xFFFFFFFF
 #define MAX_FRAGS        32
-#define MAX_GLOBAL_ROOTS 128
+#define MAX_GLOBAL_ROOTS 32
 
 layout(set = 0, binding = 0, r32ui) uniform uimage2D headPointerImage;
 
@@ -39,11 +39,26 @@ layout(push_constant) uniform PushConstants {
 
 void registerRoot(uint root, uint position) {
     for (uint i = 0; i < MAX_GLOBAL_ROOTS; i++) {
-        uint existing = atomicCompSwap(rootTable[i], NULL_IDX, root);
-        if (existing == NULL_IDX || existing == root) {
+        // Fast non-atomic read first (avoid atomic if possible)
+        uint existing = rootTable[i];
+
+        if (existing == root) {
+            // Already registered — just update max position
             atomicMax(rootTable[MAX_GLOBAL_ROOTS + i], position);
             return;
         }
+
+        if (existing == NULL_IDX) {
+            // Slot is empty — try to claim it atomically
+            uint actual = atomicCompSwap(rootTable[i], NULL_IDX, root);
+            if (actual == NULL_IDX || actual == root) {
+                // Claimed it or someone else registered same root
+                atomicMax(rootTable[MAX_GLOBAL_ROOTS + i], position);
+                return;
+            }
+            // Slot was taken by a different root between read and CAS — continue
+        }
+        // Slot taken by different root — try next
     }
 }
 
@@ -55,23 +70,9 @@ void main() {
     uint idx = imageLoad(headPointerImage, coord).r;
     uint count = 0;
 
-    uint seenRoots[MAX_FRAGS];
-    uint numSeen = 0;
-
     while (idx != NULL_IDX && count < MAX_FRAGS) {
         uint root = parent[idx];
-
-        bool alreadySeen = false;
-        for (uint i = 0; i < numSeen; i++) {
-            if (seenRoots[i] == root) { alreadySeen = true; break; }
-        }
-
-        if (!alreadySeen && numSeen < MAX_FRAGS) {
-            seenRoots[numSeen] = root;
-            numSeen++;
-            registerRoot(root, count);
-        }
-
+        registerRoot(root, count);
         count++;
         idx = nodes[idx].next;
     }

@@ -12,7 +12,7 @@
 
 #define NULL_IDX         0xFFFFFFFF
 #define MAX_FRAGS        32
-#define MAX_GLOBAL_ROOTS 128
+#define MAX_GLOBAL_ROOTS 32
 
 // NOTE: headPointerImage needs BOTH read and write
 layout(set = 0, binding = 0, r32ui) uniform uimage2D headPointerImage;
