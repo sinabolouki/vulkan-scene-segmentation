@@ -761,21 +761,9 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
                                 const glm::mat4& viewProj,
                                 uint32_t swapchainImageIndex) {
 
-    // Read previous frame's timestamps (if available)
-    if (enableTiming && m_timingReady) {
-        uint64_t results[MAX_TIMESTAMPS];
-        VkResult res = vkGetQueryPoolResults(context.device, m_timestampQueryPool,
-            0, m_timestampCount, sizeof(results), results, sizeof(uint64_t),
-            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-        if (res == VK_SUCCESS) {
-            memcpy(m_timestamps, results, sizeof(uint64_t) * m_timestampCount);
-            computeTimingResults();
-        }
-    }
-
+    readTimingResults(context.device);
     m_timestampCount = 0;
 
-    // Reset queries for this frame
     if (enableTiming) {
         vkCmdResetQueryPool(cmd, m_timestampQueryPool, 0, MAX_TIMESTAMPS);
     }
@@ -788,7 +776,7 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
     };
 
     // ─── One-time setup passes ───
-    stamp(); // [0] start
+    stamp(); // [0] frame start
 
     recordClearPhase(cmd);
     stamp(); // [1] after clear
@@ -824,7 +812,9 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
     stamp(); // [6] after compress
 
     // ─── Peel loop ───
+    // Each peel gets 3 timestamps: after clear_table, after register, after resolve
     for (uint32_t peel = 0; peel < NUM_LAYERS; peel++) {
+        // Clear root table
         vkCmdFillBuffer(cmd, m_rootTableBuffer, 0,
                         MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0xFFFFFFFF);
         vkCmdFillBuffer(cmd, m_rootTableBuffer, MAX_GLOBAL_ROOTS * sizeof(uint32_t),
@@ -832,29 +822,33 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
         recordMemoryBarrier(cmd,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        stamp(); // [7 + peel*3] after clear table
 
+        // Register roots
         recordRegisterRootsPhase(cmd);
         recordMemoryBarrier(cmd,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        stamp(); // [8 + peel*3] after register
 
+        // Resolve + advance head
         recordResolvePhase(cmd, peel);
         recordMemoryBarrier(cmd,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
             VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-
-        stamp(); // [7], [8], [9], [10] after each peel
+        stamp(); // [9 + peel*3] after resolve
     }
 
     // ─── Composite ───
+    // Timestamp index = 7 + NUM_LAYERS*3 = 19
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 
     recordCompositePhase(cmd, swapchainImageIndex);
-    stamp(); // [11] after composite
+    stamp(); // [7 + NUM_LAYERS*3] after composite
 
     m_timingReady = true;
 }
@@ -1212,29 +1206,53 @@ void UFRenderer::recordMemoryBarrier(VkCommandBuffer cmd,
     vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
+void UFRenderer::readTimingResults(VkDevice device) {
+    if (!enableTiming || !m_timestampQueryPool || m_timestampCount == 0) return;
+
+    uint64_t results[MAX_TIMESTAMPS];
+    VkResult res = vkGetQueryPoolResults(device, m_timestampQueryPool,
+        0, m_timestampCount, sizeof(results), results, sizeof(uint64_t),
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+
+    if (res == VK_SUCCESS) {
+        memcpy(m_timestamps, results, sizeof(uint64_t) * m_timestampCount);
+        computeTimingResults();
+    }
+}
+
 void UFRenderer::computeTimingResults() {
     auto ms = [&](uint32_t start, uint32_t end) -> float {
-        if (end >= m_timestampCount || start >= m_timestampCount) {
-            return 0.0f;
-        }
+        if (end >= m_timestampCount || start >= m_timestampCount) return 0.0f;
         uint64_t diff = m_timestamps[end] - m_timestamps[start];
-        return float(diff) * m_timestampPeriod / 1000000.0f; // ticks → ns → ms
+        return float(diff) * m_timestampPeriod / 1000000.0f;
     };
 
-    timingResults.clear     = ms(0, 1);
-    timingResults.collect   = ms(1, 2);
-    timingResults.sort      = ms(2, 3);
+    // One-time passes: timestamps [0]-[6]
+    timingResults.clear       = ms(0, 1);
+    timingResults.collect     = ms(1, 2);
+    timingResults.sort        = ms(2, 3);
     timingResults.initParents = ms(3, 4);
-    timingResults.merge     = ms(4, 5);
-    timingResults.compress  = ms(5, 6);
+    timingResults.merge       = ms(4, 5);
+    timingResults.compress    = ms(5, 6);
 
-    // Peels: timestamps 6→7, 7→8, 8→9, 9→10
+    // Peels: each peel has 3 timestamps at [7+i*3], [8+i*3], [9+i*3]
     timingResults.peelTotal = 0;
     for (uint32_t i = 0; i < NUM_LAYERS; i++) {
-        timingResults.peels[i] = ms(6 + i, 7 + i);
-        timingResults.peelTotal += timingResults.peels[i];
+        uint32_t base = 7 + i * 3;
+        // clearTable: from previous stamp to base
+        // For peel 0: from [6] to [7]. For peel N: from [9+(N-1)*3] to [7+N*3]
+        uint32_t peelStart = (i == 0) ? 6 : (9 + (i - 1) * 3);
+        timingResults.peels[i].clearTable    = ms(peelStart, base);
+        timingResults.peels[i].registerRoots = ms(base, base + 1);
+        timingResults.peels[i].resolve       = ms(base + 1, base + 2);
+        timingResults.peels[i].total         = ms(peelStart, base + 2);
+        timingResults.peelTotal += timingResults.peels[i].total;
     }
 
-    timingResults.composite = ms(6 + NUM_LAYERS, 7 + NUM_LAYERS);
-    timingResults.total     = ms(0, m_timestampCount - 1);
+    // Composite: from last peel end to final stamp
+    uint32_t compositeStart = 9 + (NUM_LAYERS - 1) * 3;
+    uint32_t compositeEnd = compositeStart + 1;
+    timingResults.composite = ms(compositeStart, compositeEnd);
+
+    timingResults.total = ms(0, m_timestampCount - 1);
 }

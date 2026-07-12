@@ -25,7 +25,7 @@ public:
     static constexpr uint32_t NUM_LAYERS = 4;
     static constexpr uint32_t UF_NULL = 0xFFFFFFFF;
     static constexpr uint32_t MAX_GLOBAL_ROOTS = 128;
-    static constexpr uint32_t MAX_TIMESTAMPS = 20;
+    static constexpr uint32_t MAX_TIMESTAMPS = 24;
 
     // Runtime parameters (adjustable via ImGui)
     float depthThreshold = 0.02f;
@@ -43,12 +43,21 @@ public:
         float merge = 0;
         float compress = 0;
         float peelTotal = 0;
-        float peels[NUM_LAYERS] = {};  // per-peel (register + resolve)
+        struct PeelTiming {
+            float clearTable = 0;
+            float registerRoots = 0;
+            float resolve = 0;
+            float total = 0;
+        };
+        PeelTiming peels[4];  // per-peel (register + resolve)
         float composite = 0;
         float total = 0;
     };
     TimingResults timingResults;
     bool enableTiming = true;
+
+    bool isTimingReady() const { return m_timingReady; }
+    void readTimingResults(VkDevice device);
 
     // ─── Public Interface ───
     bool init(VulkanContext& context, SwapchainManager& swapchain);

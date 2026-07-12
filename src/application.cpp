@@ -131,21 +131,28 @@ void Application::drawFrame()
     if (m_renderer.enableTiming) {
         auto& t = m_renderer.timingResults;
         ImGui::Text("GPU Timing (ms):");
-        ImGui::Text("  Clear:       %6.3f", t.clear);
-        ImGui::Text("  Collect:     %6.3f", t.collect);
-        ImGui::Text("  Sort:        %6.3f", t.sort);
-        ImGui::Text("  Init Parents:%6.3f", t.initParents);
-        ImGui::Text("  Merge:       %6.3f", t.merge);
-        ImGui::Text("  Compress:    %6.3f", t.compress);
-        ImGui::Text("  ──────────────────");
+        ImGui::Separator();
+        ImGui::Text("  Clear:        %6.3f", t.clear);
+        ImGui::Text("  Collect:      %6.3f", t.collect);
+        ImGui::Text("  Sort:         %6.3f", t.sort);
+        ImGui::Text("  Init Parents: %6.3f", t.initParents);
+        ImGui::Text("  Merge:        %6.3f", t.merge);
+        ImGui::Text("  Compress:     %6.3f", t.compress);
+        ImGui::Separator();
+
         for (uint32_t i = 0; i < 4; i++) {
-            ImGui::Text("  Peel %d:      %6.3f", i, t.peels[i]);
+            if (ImGui::TreeNode((void*)(intptr_t)i, "Peel %d: %6.3f ms", i, t.peels[i].total)) {
+                ImGui::Text("  Clear Table: %6.3f", t.peels[i].clearTable);
+                ImGui::Text("  Register:    %6.3f", t.peels[i].registerRoots);
+                ImGui::Text("  Resolve:     %6.3f", t.peels[i].resolve);
+                ImGui::TreePop();
+            }
         }
-        ImGui::Text("  Peels Total: %6.3f", t.peelTotal);
-        ImGui::Text("  ──────────────────");
-        ImGui::Text("  Composite:   %6.3f", t.composite);
-        ImGui::Text("  ══════════════════");
-        ImGui::Text("  TOTAL:       %6.3f", t.total);
+        ImGui::Text("  Peels Total:  %6.3f", t.peelTotal);
+        ImGui::Separator();
+        ImGui::Text("  Composite:    %6.3f", t.composite);
+        ImGui::Text("  ════════════════════");
+        ImGui::Text("  TOTAL:        %6.3f", t.total);
     }
     ImGui::Checkbox("Enable GPU Timing", &m_renderer.enableTiming);
 
