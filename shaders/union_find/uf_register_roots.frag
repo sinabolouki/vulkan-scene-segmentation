@@ -2,7 +2,7 @@
 
 #define NULL_IDX         0xFFFFFFFF
 #define MAX_FRAGS        32
-#define MAX_GLOBAL_ROOTS 8
+#define MAX_GLOBAL_ROOTS 128
 
 layout(set = 0, binding = 0, r32ui) uniform uimage2D headPointerImage;
 
@@ -59,7 +59,7 @@ void main() {
     uint idx = imageLoad(headPointerImage, coord).r;
     uint count = 0;
 
-    uint seenRoots[MAX_GLOBAL_ROOTS];
+    uint seenRoots[MAX_FRAGS];
     uint numSeen = 0;
 
     while (idx != NULL_IDX && count < MAX_FRAGS) {
@@ -70,7 +70,7 @@ void main() {
             if (seenRoots[i] == root) { alreadySeen = true; break; }
         }
 
-        if (!alreadySeen && numSeen < MAX_GLOBAL_ROOTS) {
+        if (!alreadySeen && numSeen < MAX_FRAGS) {
             seenRoots[numSeen] = root;
             numSeen++;
             registerRoot(root, count);

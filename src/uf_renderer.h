@@ -24,7 +24,7 @@ public:
     static constexpr uint32_t MAX_FRAGS_PER_PIXEL = 32;
     static constexpr uint32_t NUM_LAYERS = 4;
     static constexpr uint32_t UF_NULL = 0xFFFFFFFF;
-    static constexpr uint32_t MAX_GLOBAL_ROOTS = 8;
+    static constexpr uint32_t MAX_GLOBAL_ROOTS = 128;
 
     // Runtime parameters (adjustable via ImGui)
     float depthThreshold = 0.02f;

@@ -15,7 +15,7 @@
 
 #define NULL_IDX         0xFFFFFFFF
 #define MAX_FRAGS        32
-#define MAX_GLOBAL_ROOTS 8
+#define MAX_GLOBAL_ROOTS 128
 
 layout(set = 0, binding = 0, r32ui) uniform uimage2D headPointerImage;
 
@@ -105,7 +105,7 @@ vec4 debugRootColor(ivec2 coord) {
 }
 
 vec4 debugRootCount(ivec2 coord) {
-    uint seenRoots[MAX_GLOBAL_ROOTS];
+    uint seenRoots[MAX_FRAGS];
     uint numSeen = 0;
     uint idx = imageLoad(headPointerImage, coord).r;
     uint count = 0;
@@ -115,7 +115,7 @@ vec4 debugRootCount(ivec2 coord) {
         for (uint i = 0; i < numSeen; i++) {
             if (seenRoots[i] == root) { seen = true; break; }
         }
-        if (!seen && numSeen < MAX_GLOBAL_ROOTS) { seenRoots[numSeen] = root; numSeen++; }
+        if (!seen && numSeen < MAX_FRAGS) { seenRoots[numSeen] = root; numSeen++; }
         idx = nodes[idx].next; count++;
     }
     if (numSeen == 0) return vec4(0.0);

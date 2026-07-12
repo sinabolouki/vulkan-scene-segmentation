@@ -60,17 +60,19 @@ vec3 unpackColor(uint packed) {
 
 bool isSimilar(uint idxA, uint idxB) {
     // Depth check (cheap, do first)
-    float dA = nodes[idxA].depth;
-    float dB = nodes[idxB].depth;
-    if (abs(dA - dB) > depthThreshold) return false;
+    // float dA = nodes[idxA].depth;
+    // float dB = nodes[idxB].depth;
+    // if (abs(dA - dB) > depthThreshold) return false;
 
-    // Color check
-    vec3 cA = unpackColor(nodes[idxA].color);
-    vec3 cB = unpackColor(nodes[idxB].color);
-    float dist = distance(cA, cB);
-    if (dist > colorThreshold) return false;
+    // // Color check
+    // vec3 cA = unpackColor(nodes[idxA].color);
+    // vec3 cB = unpackColor(nodes[idxB].color);
+    // float dist = distance(cA, cB);
+    // if (dist > colorThreshold) return false;
+    int objectA = int(nodes[idxA].objectID);
+    int objectB = int(nodes[idxB].objectID);
 
-    return true;
+    return objectA == objectB;
 }
 
 // ─── Union-Find: Find Root ───────────────────────────────────────────────────
@@ -135,16 +137,6 @@ void main() {
 
     if (myCount == 0) return;  // empty pixel, nothing to do
 
-    // ─── Union within same pixel ─────────────────────────────────────────────
-    // Fragments in the same pixel at similar depth+color likely belong to the
-    // same surface (e.g., triangle seams of the same mesh).
-    for (uint i = 0; i < myCount; i++) {
-        for (uint j = i + 1; j < myCount; j++) {
-            if (isSimilar(myFrags[i], myFrags[j])) {
-                uf_union(myFrags[i], myFrags[j]);
-            }
-        }
-    }
 
     // ─── Union with 8 neighbors ──────────────────────────────────────────────
     for (int dy = -1; dy <= 1; dy++) {
