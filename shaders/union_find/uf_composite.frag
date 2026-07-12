@@ -28,15 +28,15 @@ void main() {
     vec2 uv = gl_FragCoord.xy / vec2(textureSize(layer0, 0));
 
     // Debug mode: just show layer 0 directly
-    if (displayLayer >= 100) {
-        vec4 c = texture(layer0, uv);
-        if (c.a < 0.01) {
-            outColor = vec4(0.02, 0.02, 0.08, 1.0);  // background
-        } else {
-            outColor = vec4(c.rgb, 1.0);
-        }
-        return;
-    }
+    // if (displayLayer >= 100) {
+    //     vec4 c = texture(layer0, uv);
+    //     if (c.a < 0.01) {
+    //         outColor = vec4(0.02, 0.02, 0.08, 1.0);  // background
+    //     } else {
+    //         outColor = vec4(c.rgb, 1.0);
+    //     }
+    //     return;
+    // }
 
     // Single layer display mode
     if (displayLayer >= 0 && displayLayer < int(numLayers)) {

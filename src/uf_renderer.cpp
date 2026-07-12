@@ -746,6 +746,7 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
                                 const std::vector<SceneObject>& objects,
                                 const glm::mat4& viewProj,
                                 uint32_t swapchainImageIndex) {
+    // ─── One-time setup passes ───
     recordClearPhase(cmd);
 
     recordCollectPhase(cmd, vertexBuffer, indexBuffer, objects, viewProj);
@@ -773,34 +774,33 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-    // ─── Clear root table to 0xFFFFFFFF ───
-    // ─── Clear root table ───
-    // First half (rootIDs): fill with 0xFFFFFFFF (empty sentinel)
-    vkCmdFillBuffer(cmd, m_rootTableBuffer, 0,
-                    MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0xFFFFFFFF);
-    // Second half (maxDepths): fill with 0 (atomicMax grows from 0)
-    vkCmdFillBuffer(cmd, m_rootTableBuffer, MAX_GLOBAL_ROOTS * sizeof(uint32_t),
-                    MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0);
-    recordMemoryBarrier(cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    // ─── Peel loop ───
+    for (uint32_t peel = 0; peel < NUM_LAYERS; peel++) {
+        // Clear root table
+        vkCmdFillBuffer(cmd, m_rootTableBuffer, 0,
+                        MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0xFFFFFFFF);
+        vkCmdFillBuffer(cmd, m_rootTableBuffer, MAX_GLOBAL_ROOTS * sizeof(uint32_t),
+                        MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0);
+        recordMemoryBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-    // ─── Register global roots ───
-    recordRegisterRootsPhase(cmd);
-    recordMemoryBarrier(cmd,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        // Register roots from remaining list
+        recordRegisterRootsPhase(cmd);
+        recordMemoryBarrier(cmd,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-    // ─── Resolve layers ───
-    for (uint32_t layer = 0; layer < NUM_LAYERS; layer++) {
-        recordResolvePhase(cmd, layer);
-        if (layer < NUM_LAYERS - 1) {
-            recordMemoryBarrier(cmd,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-        }
+        // Resolve + advance head pointer
+        recordResolvePhase(cmd, peel);
+        recordMemoryBarrier(cmd,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     }
 
+    // ─── Composite ───
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);

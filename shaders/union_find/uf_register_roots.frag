@@ -25,7 +25,6 @@ layout(set = 0, binding = 3, std430) buffer ParentBuffer {
     uint parent[];
 };
 
-// Layout: [0..7] = rootIDs, [8..15] = maxDepths
 layout(set = 0, binding = 4, std430) coherent buffer RootTable {
     uint rootTable[];
 };
@@ -38,17 +37,13 @@ layout(push_constant) uniform PushConstants {
     uint  targetLayer;
 };
 
-void registerRoot(uint root, uint depthBits) {
+void registerRoot(uint root, uint position) {
     for (uint i = 0; i < MAX_GLOBAL_ROOTS; i++) {
-        // Try to claim slot i (rootID part)
         uint existing = atomicCompSwap(rootTable[i], NULL_IDX, root);
-
         if (existing == NULL_IDX || existing == root) {
-            // Slot is ours — update max depth (depth stored at offset MAX_GLOBAL_ROOTS)
-            atomicMax(rootTable[MAX_GLOBAL_ROOTS + i], depthBits);
+            atomicMax(rootTable[MAX_GLOBAL_ROOTS + i], position);
             return;
         }
-        // Slot taken by different root — try next
     }
 }
 
@@ -56,6 +51,7 @@ void main() {
     ivec2 coord = ivec2(gl_FragCoord.xy);
     if (coord.x >= int(screenWidth) || coord.y >= int(screenHeight)) return;
 
+    // Walk from current head (already advanced by previous peels)
     uint idx = imageLoad(headPointerImage, coord).r;
     uint count = 0;
 
@@ -76,7 +72,7 @@ void main() {
             registerRoot(root, count);
         }
 
-        idx = nodes[idx].next;
         count++;
+        idx = nodes[idx].next;
     }
 }

@@ -43,7 +43,8 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
         return false;
 
     // Scene
-    std::string scenePath = "../assets/circles16.obj";
+    // std::string scenePath = "../assets/circles16.obj";
+    std::string scenePath = "../assets/simple_scene.obj";
     if (!m_scene.loadFromOBJ(scenePath))
     {
         std::cerr << "Failed to load scene: " << scenePath << std::endl;
@@ -122,11 +123,17 @@ void Application::drawFrame()
     m_imguiManager.beginFrame();
 
     // ─── ImGui UI ───
+    #ifdef RENDER_METHOD_PPLL
     ImGui::Begin("PPLL Renderer");
+    #elif defined(RENDER_METHOD_UNION_FIND)
+    ImGui::Begin("Union-Find Renderer");
+    #elif defined(RENDER_METHOD_DEPTH_PEELING)
+    ImGui::Begin("Depth Peeling Renderer");
+    #endif
     ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameTimeMs);
     ImGui::Separator();
-    ImGui::SliderFloat("Depth Threshold", &m_renderer.depthThreshold, 0.001f, 0.1f, "%.4f");
-    ImGui::SliderFloat("Color Threshold", &m_renderer.colorThreshold, 0.01f, 0.5f, "%.3f");
+    //ImGui::SliderFloat("Depth Threshold", &m_renderer.depthThreshold, 0.001f, 0.1f, "%.4f");
+    //ImGui::SliderFloat("Color Threshold", &m_renderer.colorThreshold, 0.01f, 0.5f, "%.3f");
 #ifdef RENDER_METHOD_PPLL
     int grow = (int)m_renderer.growIterations;
     ImGui::SliderInt("Grow Iterations", &grow, 1, 100);
@@ -228,21 +235,6 @@ void Application::keyCallback(GLFWwindow *window, int key, int scancode, int act
         case GLFW_KEY_4:
             app->m_renderer.debugDisplayLayer = 3;
             break; // Layer 3
-        case GLFW_KEY_5:
-            app->m_renderer.debugDisplayLayer = 100;
-            break; // Root colors
-        case GLFW_KEY_6:
-            app->m_renderer.debugDisplayLayer = 101;
-            break; // Root count
-        case GLFW_KEY_7:
-            app->m_renderer.debugDisplayLayer = 102;
-            break; // Depth
-        case GLFW_KEY_8:
-            app->m_renderer.debugDisplayLayer = 103;
-            break; // Frag count
-        case GLFW_KEY_9:
-            app->m_renderer.debugDisplayLayer = 104;
-            break; // Bypass test
         }
     }
 }
