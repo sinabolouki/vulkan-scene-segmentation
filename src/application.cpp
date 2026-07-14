@@ -140,7 +140,7 @@ void Application::drawFrame()
         ImGui::Text("  Compress:     %6.3f", t.compress);
         ImGui::Separator();
 
-        for (uint32_t i = 0; i < 4; i++) {
+        for (uint32_t i = 0; i < m_renderer.NUM_LAYERS; i++) {
             if (ImGui::TreeNode((void*)(intptr_t)i, "Peel %d: %6.3f ms", i, t.peels[i].total)) {
                 ImGui::Text("  Clear Table: %6.3f", t.peels[i].clearTable);
                 ImGui::Text("  Register:    %6.3f", t.peels[i].registerRoots);
