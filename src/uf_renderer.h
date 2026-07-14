@@ -22,10 +22,10 @@ public:
     // ─── Configuration ───
     static constexpr uint32_t AVG_FRAGS_PER_PIXEL = 8;
     static constexpr uint32_t MAX_FRAGS_PER_PIXEL = 32;
-    static constexpr uint32_t NUM_LAYERS = 4;
+    static constexpr uint32_t NUM_LAYERS = 8;
     static constexpr uint32_t UF_NULL = 0xFFFFFFFF;
     static constexpr uint32_t MAX_GLOBAL_ROOTS = 32;
-    static constexpr uint32_t MAX_TIMESTAMPS = 24;
+    static constexpr uint32_t MAX_TIMESTAMPS = 40;
 
     // Runtime parameters (adjustable via ImGui)
     float depthThreshold = 0.02f;
@@ -49,7 +49,7 @@ public:
             float resolve = 0;
             float total = 0;
         };
-        PeelTiming peels[4];  // per-peel (register + resolve)
+        PeelTiming peels[NUM_LAYERS];  // per-peel (register + resolve)
         float composite = 0;
         float total = 0;
     };

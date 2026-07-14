@@ -1,21 +1,13 @@
 #version 450
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Composite Pass
-//
-// Blends layer textures back-to-front onto the swapchain.
-// Supports debug display modes.
-//
-// displayLayer:
-//   -1    → normal composite (all layers back-to-front)
-//   0-3   → show single layer only
-//   >=100 → debug mode (show layer 0 which contains debug visualization)
-// ═══════════════════════════════════════════════════════════════════════════════
-
 layout(set = 0, binding = 0) uniform sampler2D layer0;
 layout(set = 0, binding = 1) uniform sampler2D layer1;
 layout(set = 0, binding = 2) uniform sampler2D layer2;
 layout(set = 0, binding = 3) uniform sampler2D layer3;
+layout(set = 0, binding = 4) uniform sampler2D layer4;
+layout(set = 0, binding = 5) uniform sampler2D layer5;
+layout(set = 0, binding = 6) uniform sampler2D layer6;
+layout(set = 0, binding = 7) uniform sampler2D layer7;
 
 layout(push_constant) uniform PushConstants {
     uint numLayers;
@@ -24,53 +16,40 @@ layout(push_constant) uniform PushConstants {
 
 layout(location = 0) out vec4 outColor;
 
+vec4 sampleLayer(uint index, vec2 uv) {
+    if      (index == 0u) return texture(layer0, uv);
+    else if (index == 1u) return texture(layer1, uv);
+    else if (index == 2u) return texture(layer2, uv);
+    else if (index == 3u) return texture(layer3, uv);
+    else if (index == 4u) return texture(layer4, uv);
+    else if (index == 5u) return texture(layer5, uv);
+    else if (index == 6u) return texture(layer6, uv);
+    else                   return texture(layer7, uv);
+}
+
 void main() {
     vec2 uv = gl_FragCoord.xy / vec2(textureSize(layer0, 0));
 
-    // Debug mode: just show layer 0 directly
-    // if (displayLayer >= 100) {
-    //     vec4 c = texture(layer0, uv);
-    //     if (c.a < 0.01) {
-    //         outColor = vec4(0.02, 0.02, 0.08, 1.0);  // background
-    //     } else {
-    //         outColor = vec4(c.rgb, 1.0);
-    //     }
-    //     return;
-    // }
-
-    // Single layer display mode
-    if (displayLayer >= 0 && displayLayer < int(numLayers)) {
-        vec4 c;
-        switch (displayLayer) {
-            case 0: c = texture(layer0, uv); break;
-            case 1: c = texture(layer1, uv); break;
-            case 2: c = texture(layer2, uv); break;
-            case 3: c = texture(layer3, uv); break;
-            default: c = vec4(0.0); break;
-        }
-        if (c.a < 0.01) {
-            outColor = vec4(0.02, 0.02, 0.08, 1.0);  // background
-        } else {
-            outColor = vec4(c.rgb, 1.0);
-        }
+    // Debug: show single layer
+    if (displayLayer >= 100) {
+        vec4 c = sampleLayer(0u, uv);
+        outColor = (c.a < 0.01) ? vec4(0.02, 0.02, 0.08, 1.0) : vec4(c.rgb, 1.0);
         return;
     }
 
-    // Normal composite: blend layers back-to-front
-    // Layer 3 (deepest) → Layer 0 (frontmost)
-    vec4 result = vec4(0.02, 0.02, 0.08, 1.0);  // background color
+    if (displayLayer >= 0 && displayLayer < int(numLayers)) {
+        vec4 c = sampleLayer(uint(displayLayer), uv);
+        outColor = (c.a < 0.01) ? vec4(0.02, 0.02, 0.08, 1.0) : vec4(c.rgb, 1.0);
+        return;
+    }
 
-    // Back to front: 3, 2, 1, 0
-    vec4 c3 = texture(layer3, uv);
-    vec4 c2 = texture(layer2, uv);
-    vec4 c1 = texture(layer1, uv);
-    vec4 c0 = texture(layer0, uv);
+    // Normal composite: back-to-front
+    vec3 result = vec3(0.02, 0.02, 0.08);
 
-    // Alpha blending (over operator): front over back
-    if (c3.a > 0.01) result = vec4(c3.rgb, 1.0);
-    if (c2.a > 0.01) result = vec4(c2.rgb, 1.0);
-    if (c1.a > 0.01) result = vec4(c1.rgb, 1.0);
-    if (c0.a > 0.01) result = vec4(c0.rgb, 1.0);
+    for (uint i = numLayers; i > 0u; i--) {
+        vec4 c = sampleLayer(i - 1u, uv);
+        if (c.a > 0.01) result = c.rgb;
+    }
 
-    outColor = result;
+    outColor = vec4(result, 1.0);
 }

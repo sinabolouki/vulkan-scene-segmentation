@@ -6,7 +6,6 @@
 // For each pixel: collect all local fragments, then for each of 8 neighbors
 // walk their entire linked list. If any pair (local, neighbor) is similar
 // in depth and color, Union() their parent pointers.
-// Also unions within the same pixel for fragments at similar depth+color.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #define NULL_IDX     0xFFFFFFFF

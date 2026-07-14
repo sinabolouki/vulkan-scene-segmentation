@@ -69,6 +69,10 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
     std::cout << "[App] Render method: PER-PIXEL LINKED LIST" << std::endl;
 #endif
 
+
+    // Initialize camera after scene is loaded
+    initCamera();
+
     std::cout << "[App] Initialization complete." << std::endl;
     return true;
 }
@@ -85,17 +89,12 @@ void Application::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex)
 
     // Camera
     float aspect = (float)m_swapchain.getExtent().width / (float)m_swapchain.getExtent().height;
-    glm::vec3 center = m_scene.getCenter();
-    float radius = m_scene.getRadius();
-    glm::vec3 eye = center + glm::vec3(0.0f, radius * 0.5f, radius * 2.0f);
-    eye = center + glm::vec3(1.5f, 0.5f, 0.0f) * radius; // Slightly offset for better view
-    glm::mat4 view = glm::lookAt(eye, center, glm::vec3(0.0f, 1.0f, 0.0f));
+    glm::mat4 view = m_camera.getViewMatrix();
     m_renderer.nearPlane = 0.01f;
-    m_renderer.farPlane = radius * 10.0f;
+    m_renderer.farPlane = m_camera.distance * 10.0f;
     glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, m_renderer.nearPlane, m_renderer.farPlane);
     glm::mat4 viewProj = proj * view;
 
-    // Both renderers share the same interface:
     m_renderer.recordCommands(cmd, m_context, m_swapchain,
                               m_vertexBuffer, m_indexBuffer,
                               m_scene.getObjects(),
@@ -121,6 +120,7 @@ void Application::drawFrame()
 
     // Begin ImGui frame (before fence wait is fine — ImGui just builds draw lists)
     m_imguiManager.beginFrame();
+    updateCamera();
 
     // ─── ImGui UI ───
     #ifdef RENDER_METHOD_UNION_FIND
@@ -157,9 +157,10 @@ void Application::drawFrame()
     ImGui::Checkbox("Enable GPU Timing", &m_renderer.enableTiming);
 
     ImGui::Separator();
-    const char *layerNames[] = {"Composite", "Layer 0", "Layer 1", "Layer 2", "Layer 3"};
+    const char *layerNames[] = {"Composite", "Layer 0", "Layer 1", "Layer 2", "Layer 3",
+                                "Layer 4", "Layer 5", "Layer 6", "Layer 7"};
     int layerIdx = m_renderer.debugDisplayLayer + 1;
-    ImGui::Combo("Display", &layerIdx, layerNames, 5);
+    ImGui::Combo("Display", &layerIdx, layerNames, 9);
     m_renderer.debugDisplayLayer = layerIdx - 1;
     ImGui::End();
 #elif defined(RENDER_METHOD_PPLL)
@@ -394,4 +395,70 @@ uint32_t Application::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags 
             return i;
     }
     return 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Camera
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Application::initCamera() {
+    glm::vec3 center = m_scene.getCenter();
+    float radius = m_scene.getRadius();
+
+    m_camera.target = center;
+    m_camera.distance = radius * 2.5f;
+    m_camera.yaw = 0.0f;
+    m_camera.pitch = 0.3f;
+    m_camera.updateFromOrbit();
+}
+
+void Application::updateCamera() {
+    // Don't process camera input if ImGui wants the mouse
+    if (ImGui::GetIO().WantCaptureMouse) {
+        m_firstMouse = true;  // reset so we don't get a jump when returning to viewport
+        return;
+    }
+
+    double mouseX, mouseY;
+    glfwGetCursorPos(m_window, &mouseX, &mouseY);
+
+    if (m_firstMouse) {
+        m_lastMouseX = mouseX;
+        m_lastMouseY = mouseY;
+        m_firstMouse = false;
+    }
+
+    double dx = mouseX - m_lastMouseX;
+    double dy = mouseY - m_lastMouseY;
+    m_lastMouseX = mouseX;
+    m_lastMouseY = mouseY;
+
+    // Left mouse: orbit
+    if (glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
+        m_camera.yaw   -= float(dx) * m_camera.orbitSpeed;
+        m_camera.pitch += float(dy) * m_camera.orbitSpeed;
+        m_camera.pitch = glm::clamp(m_camera.pitch, -1.5f, 1.5f);
+        m_camera.updateFromOrbit();
+    }
+
+    // Middle mouse: pan
+    if (glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS) {
+        glm::vec3 forward = glm::normalize(m_camera.target - m_camera.position);
+        glm::vec3 right = glm::normalize(glm::cross(forward, m_camera.up));
+        glm::vec3 camUp = glm::normalize(glm::cross(right, forward));
+
+        float panScale = m_camera.distance * m_camera.panSpeed;
+        m_camera.target -= right * float(dx) * panScale;
+        m_camera.target += camUp * float(dy) * panScale;
+        m_camera.updateFromOrbit();
+    }
+
+    // Scroll: zoom (use ImGui's scroll data since ImGui still handles the callback)
+    // Alternative: read scroll via ImGui IO
+    float scroll = ImGui::GetIO().MouseWheel;
+    if (scroll != 0.0f) {
+        m_camera.distance -= scroll * m_camera.distance * m_camera.zoomSpeed;
+        m_camera.distance = glm::max(m_camera.distance, 0.01f);
+        m_camera.updateFromOrbit();
+    }
 }
