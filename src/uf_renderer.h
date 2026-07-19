@@ -9,13 +9,15 @@ struct VulkanContext;
 class SwapchainManager;
 struct SceneObject;
 
-// GPU-side fragment node — must match GLSL layout exactly (16 bytes)
+// GPU-side fragment node — must match GLSL layout exactly (20 bytes)
 struct UFFragmentNode {
     uint32_t color;      // Packed RGBA8
-    float    depth;      // Fragment depth [0, 1]
+    float    depth;      // Fragment depth [0, 1] linear
+    uint32_t normalXY;   // ← NEW: packed view-space normal (2x float16)
     uint32_t objectID;   // Which object this fragment belongs to
     uint32_t next;       // Index of next node (0xFFFFFFFF = null)
 };
+// sizeof = 20 bytes (will be padded to 20 by std430 — no issue since it's array of scalars)
 
 class UFRenderer {
 public:
@@ -28,8 +30,8 @@ public:
     static constexpr uint32_t MAX_TIMESTAMPS = 40;
 
     // Runtime parameters (adjustable via ImGui)
-    float depthThreshold = 0.02f;
-    float colorThreshold = 0.15f;
+    float depthThreshold = 0.007f;
+    float colorThreshold = 1.0f;
     int debugDisplayLayer = -1;   // -1 = composite all, 0-3 = single layer
 
     float nearPlane = 0.1f;
@@ -71,6 +73,8 @@ public:
                         VkBuffer indexBuffer,
                         const std::vector<SceneObject>& objects,
                         const glm::mat4& viewProj,
+                        const glm::mat4& view,        // ← NEW
+                        const glm::mat4& projection,  // ← NEW (needed for projX, projY)
                         uint32_t swapchainImageIndex);
 
     // ─── Debug Info ───
@@ -105,7 +109,7 @@ private:
     void recordCollectPhase(VkCommandBuffer cmd,
                             VkBuffer vertexBuffer, VkBuffer indexBuffer,
                             const std::vector<SceneObject>& objects,
-                            const glm::mat4& viewProj);
+                            const glm::mat4& viewProj, const glm::mat4& view);
 
     // Phase 3: Sort each pixel's linked list front-to-back
     void recordSortPhase(VkCommandBuffer cmd);
@@ -157,6 +161,10 @@ private:
 
     uint32_t m_width = 0;
     uint32_t m_height = 0;
+
+    // Projection matrix parameters (for reconstructing view-space position)
+    float m_projX = 1.0f;
+    float m_projY = 1.0f;
 
     // ═══════════════════════════════════════════════════════════
     // PPLL DATA STRUCTURES

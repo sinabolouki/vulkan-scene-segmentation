@@ -98,7 +98,7 @@ void Application::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex)
     m_renderer.recordCommands(cmd, m_context, m_swapchain,
                               m_vertexBuffer, m_indexBuffer,
                               m_scene.getObjects(),
-                              viewProj, imageIndex);
+                              viewProj, view, proj, imageIndex);
 
     m_imguiManager.render(cmd, m_swapchain.getExtent(),
                           m_imguiManager.getFramebuffer(imageIndex));
@@ -125,6 +125,7 @@ void Application::drawFrame()
     // ─── ImGui UI ───
     #ifdef RENDER_METHOD_UNION_FIND
     ImGui::Begin("Union-Find Renderer");
+    ImGui::SliderFloat("Depth Threshold", &m_renderer.depthThreshold, 0.0001f, 2.0f, "%.4f");
     ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameTimeMs);
     ImGui::Separator();
 

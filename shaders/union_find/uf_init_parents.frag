@@ -17,6 +17,7 @@ layout(set = 0, binding = 0, r32ui) uniform uimage2D headPointerImage;
 struct FragmentNode {
     uint  color;
     float depth;
+    uint  normalXY;    // Packed view-space normal (2x float16 via packHalf2x16)
     uint  objectID;
     uint  next;
 };

@@ -8,11 +8,14 @@ layout(location = 3) in vec2 inUV;
 layout(push_constant) uniform PushConstants {
     mat4 model;
     mat4 viewProj;
+    mat4 view;        // ← NEW
     uint objectID;
+    float nearPlane;
+    float farPlane;
 } pc;
 
 layout(location = 0) out vec3 fragColor;
-layout(location = 1) out vec3 fragNormal;
+layout(location = 1) out vec3 fragNormalView;  // ← renamed for clarity: VIEW-space normal
 layout(location = 2) flat out uint fragObjectID;
 
 void main() {
@@ -20,6 +23,12 @@ void main() {
     gl_Position = pc.viewProj * worldPos;
 
     fragColor = inColor;
-    fragNormal = normalize(mat3(pc.model) * inNormal);
+
+    // Transform normal to VIEW space (not world space)
+    // For uniform scale: mat3(view * model) is sufficient
+    // For non-uniform scale you'd need inverse-transpose, but for a thesis prototype this is fine
+    mat3 normalMatrix = mat3(pc.view * pc.model);
+    fragNormalView = normalize(normalMatrix * inNormal);
+
     fragObjectID = pc.objectID;
 }

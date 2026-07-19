@@ -759,7 +759,12 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
                                 VkBuffer indexBuffer,
                                 const std::vector<SceneObject>& objects,
                                 const glm::mat4& viewProj,
+                                const glm::mat4& view,        // ← NEW
+                                const glm::mat4& projection,  // ← NEW (needed for projX, projY)
                                 uint32_t swapchainImageIndex) {
+
+    m_projX = projection[0][0];
+    m_projY = projection[1][1];
 
     readTimingResults(context.device);
     m_timestampCount = 0;
@@ -781,7 +786,7 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
     recordClearPhase(cmd);
     stamp(); // [1] after clear
 
-    recordCollectPhase(cmd, vertexBuffer, indexBuffer, objects, viewProj);
+    recordCollectPhase(cmd, vertexBuffer, indexBuffer, objects, viewProj, view);
     recordMemoryBarrier(cmd,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
@@ -901,10 +906,14 @@ void UFRenderer::recordClearPhase(VkCommandBuffer cmd) {
 // PHASE 2: COLLECT
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// In recordCollectPhase — update the push constants to include view matrix
+// Replace the loop body where push constants are set:
+
 void UFRenderer::recordCollectPhase(VkCommandBuffer cmd,
                                     VkBuffer vertexBuffer, VkBuffer indexBuffer,
                                     const std::vector<SceneObject>& objects,
-                                    const glm::mat4& viewProj) {
+                                    const glm::mat4& viewProj,
+                                    const glm::mat4& view) {  // ← NEW parameter
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_noAttachmentRenderPass;
     rp.framebuffer = m_noAttachmentFramebuffer;
@@ -913,7 +922,6 @@ void UFRenderer::recordCollectPhase(VkCommandBuffer cmd,
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_collectPipeline);
 
-    // Flipped viewport for correct coordinate system
     VkViewport vp{0, (float)m_height, (float)m_width, -(float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
     VkRect2D sc = { {0, 0}, {m_width, m_height} };
@@ -931,6 +939,7 @@ void UFRenderer::recordCollectPhase(VkCommandBuffer cmd,
         UFScenePushConstants pc{};
         pc.model = glm::mat4(1.0f);
         pc.viewProj = viewProj;
+        pc.view = view;           // ← NEW
         pc.objectID = obj.objectID;
         pc.nearPlane = nearPlane;
         pc.farPlane = farPlane;
@@ -1038,6 +1047,10 @@ void UFRenderer::recordMergePhase(VkCommandBuffer cmd) {
     pc.screenWidth = m_width;
     pc.screenHeight = m_height;
     pc.targetLayer = 0;
+    pc.nearPlane = nearPlane;      // ← NEW
+    pc.farPlane = farPlane;        // ← NEW
+    pc.projX = m_projX;            // ← NEW
+    pc.projY = m_projY;            // ← NEW
     vkCmdPushConstants(cmd, m_fullscreenPipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
 
