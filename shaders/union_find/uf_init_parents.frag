@@ -39,8 +39,8 @@ layout(set = 0, binding = 3, std430) buffer ParentBuffer {
 // ─── Push Constants ──────────────────────────────────────────────────────────
 
 layout(push_constant) uniform PushConstants {
-    float depthThreshold;
-    float colorThreshold;
+    float planeThreshold;
+    float proximityScale;
     uint  screenWidth;
     uint  screenHeight;
     uint  targetLayer;

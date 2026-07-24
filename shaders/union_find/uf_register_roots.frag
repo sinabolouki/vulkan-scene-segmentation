@@ -33,8 +33,8 @@ layout(set = 0, binding = 4, std430) coherent buffer RootTable {
 };
 
 layout(push_constant) uniform PushConstants {
-    float depthThreshold;
-    float colorThreshold;
+    float planeThreshold;
+    float proximityScale;
     uint  screenWidth;
     uint  screenHeight;
     uint  targetLayer;

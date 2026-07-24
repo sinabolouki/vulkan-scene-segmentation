@@ -123,9 +123,27 @@ void Application::drawFrame()
     updateCamera();
 
     // ─── ImGui UI ───
-    #ifdef RENDER_METHOD_UNION_FIND
+     #ifdef RENDER_METHOD_UNION_FIND
     ImGui::Begin("Union-Find Renderer");
-    ImGui::SliderFloat("Depth Threshold", &m_renderer.depthThreshold, 0.0001f, 2.0f, "%.4f");
+
+    // ─── Connectivity Parameters ───
+    ImGui::Text("Connectivity Parameters");
+    ImGui::Separator();
+    ImGui::SliderFloat("Plane Threshold", &m_renderer.planeThreshold, 0.1f, 10.0f, "%.2f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Tangent-plane residual tolerance (x pixelStep).\n"
+                          "Higher = more permissive on curved surfaces.\n"
+                          "Lower = stricter, may split curved objects.");
+
+    ImGui::SliderFloat("Proximity Scale", &m_renderer.proximityScale, 0.5f, 10.0f, "%.2f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Proximity fallback for sharp edges/creases (x pixelStep).\n"
+                          "Higher = merges cube edges more aggressively.\n"
+                          "Lower = may split objects at sharp creases.");
+
+    ImGui::Separator();
+
+    // ─── Performance ───
     ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameTimeMs);
     ImGui::Separator();
 
@@ -158,11 +176,25 @@ void Application::drawFrame()
     ImGui::Checkbox("Enable GPU Timing", &m_renderer.enableTiming);
 
     ImGui::Separator();
+
     const char *layerNames[] = {"Composite", "Layer 0", "Layer 1", "Layer 2", "Layer 3",
                                 "Layer 4", "Layer 5", "Layer 6", "Layer 7"};
     int layerIdx = m_renderer.debugDisplayLayer + 1;
     ImGui::Combo("Display", &layerIdx, layerNames, 9);
     m_renderer.debugDisplayLayer = layerIdx - 1;
+
+    ImGui::Separator();
+
+    // ─── Debug Info ───
+    if (ImGui::CollapsingHeader("Debug Info")) {
+        ImGui::Text("Resolution: %u x %u", m_renderer.getWidth(), m_renderer.getHeight());
+        ImGui::Text("Node Capacity: %u", m_renderer.getNodeBufferCapacity());
+        ImGui::Text("Node Size: %zu bytes", sizeof(UFFragmentNode));
+        ImGui::Text("Node Buffer: %.1f MB",
+            m_renderer.getNodeBufferCapacity() * sizeof(UFFragmentNode) / (1024.0f * 1024.0f));
+        ImGui::Text("Near/Far: %.3f / %.1f", m_renderer.nearPlane, m_renderer.farPlane);
+    }
+
     ImGui::End();
 #elif defined(RENDER_METHOD_PPLL)
     ImGui::Begin("PPLL Renderer");

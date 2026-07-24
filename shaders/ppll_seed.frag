@@ -32,7 +32,7 @@ layout(set = 0, binding = 5, r32f) uniform readonly image2D consumedDepthImage;
 
 layout(push_constant) uniform PushConstants {
     float depthThreshold;
-    float colorThreshold;
+    float proximityScale;
 } pc;
 
 #define PPLL_NULL 0xFFFFFFFFu

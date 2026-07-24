@@ -974,8 +974,8 @@ void UFRenderer::recordSortPhase(VkCommandBuffer cmd) {
                             m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
 
     UFFullscreenPushConstants pc{};
-    pc.depthThreshold = depthThreshold;
-    pc.colorThreshold = colorThreshold;
+    pc.planeThreshold = planeThreshold;
+    pc.proximityScale = proximityScale;
     pc.screenWidth = m_width;
     pc.screenHeight = m_height;
     pc.targetLayer = 0;
@@ -1008,8 +1008,8 @@ void UFRenderer::recordInitParentsPhase(VkCommandBuffer cmd) {
                             m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
 
     UFFullscreenPushConstants pc{};
-    pc.depthThreshold = depthThreshold;
-    pc.colorThreshold = colorThreshold;
+    pc.planeThreshold = planeThreshold;
+    pc.proximityScale = proximityScale;
     pc.screenWidth = m_width;
     pc.screenHeight = m_height;
     pc.targetLayer = 0;
@@ -1042,15 +1042,15 @@ void UFRenderer::recordMergePhase(VkCommandBuffer cmd) {
                             m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
 
     UFFullscreenPushConstants pc{};
-    pc.depthThreshold = depthThreshold;
-    pc.colorThreshold = colorThreshold;
+    pc.planeThreshold = planeThreshold;
+    pc.proximityScale = proximityScale;
     pc.screenWidth = m_width;
     pc.screenHeight = m_height;
     pc.targetLayer = 0;
-    pc.nearPlane = nearPlane;      // ← NEW
-    pc.farPlane = farPlane;        // ← NEW
-    pc.projX = m_projX;            // ← NEW
-    pc.projY = m_projY;            // ← NEW
+    pc.nearPlane = nearPlane;
+    pc.farPlane = farPlane;
+    pc.projX = m_projX;
+    pc.projY = m_projY;
     vkCmdPushConstants(cmd, m_fullscreenPipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
 
@@ -1080,8 +1080,8 @@ void UFRenderer::recordCompressPhase(VkCommandBuffer cmd) {
                             m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
 
     UFFullscreenPushConstants pc{};
-    pc.depthThreshold = depthThreshold;
-    pc.colorThreshold = colorThreshold;
+    pc.planeThreshold = planeThreshold;
+    pc.proximityScale = proximityScale;
     pc.screenWidth = m_width;
     pc.screenHeight = m_height;
     pc.targetLayer = 0;
@@ -1110,8 +1110,8 @@ void UFRenderer::recordRegisterRootsPhase(VkCommandBuffer cmd) {
                             m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
 
     UFFullscreenPushConstants pc{};
-    pc.depthThreshold = depthThreshold;
-    pc.colorThreshold = colorThreshold;
+    pc.planeThreshold = planeThreshold;
+    pc.proximityScale = proximityScale;
     pc.screenWidth = m_width;
     pc.screenHeight = m_height;
     pc.targetLayer = 0;
@@ -1149,8 +1149,8 @@ void UFRenderer::recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex) {
                             m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
 
     UFFullscreenPushConstants pc{};
-    pc.depthThreshold = depthThreshold;
-    pc.colorThreshold = colorThreshold;
+    pc.planeThreshold = planeThreshold;
+    pc.proximityScale = proximityScale;
     pc.screenWidth = m_width;
     pc.screenHeight = m_height;
     pc.nearPlane = nearPlane;      // ← NEW

@@ -32,8 +32,9 @@ public:
     static constexpr uint32_t MAX_TIMESTAMPS = 40;
 
     // Runtime parameters (adjustable via ImGui)
-    float depthThreshold = 0.007f;
-    float colorThreshold = 1.0f;
+    // Runtime parameters (adjustable via ImGui)
+    float planeThreshold = 1.5f;    // Multiplier for tangent-plane test (× pixelStep)
+    float proximityScale = 3.0f;    // Multiplier for crease/edge proximity test (× pixelStep)
     int debugDisplayLayer = -1;   // -1 = composite all, 0-3 = single layer
 
     float nearPlane = 0.1f;
