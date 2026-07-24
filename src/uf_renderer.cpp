@@ -1153,6 +1153,10 @@ void UFRenderer::recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex) {
     pc.colorThreshold = colorThreshold;
     pc.screenWidth = m_width;
     pc.screenHeight = m_height;
+    pc.nearPlane = nearPlane;      // ← NEW
+    pc.farPlane = farPlane;        // ← NEW
+    pc.projX = m_projX;            // ← NEW
+    pc.projY = m_projY;            // ← NEW
 
     // Debug mode: layer 0 gets the debug code, other layers get normal (will output transparent)
     if (debugDisplayLayer >= 100 && layerIndex == 0) {

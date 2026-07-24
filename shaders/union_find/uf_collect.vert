@@ -22,7 +22,7 @@ void main() {
     vec4 worldPos = pc.model * vec4(inPosition, 1.0);
     gl_Position = pc.viewProj * worldPos;
 
-    fragColor = inColor;
+    fragColor = vec3(0.5f,0.5f,0.5f); // inColor; // Use a constant color for now
 
     // Transform normal to VIEW space (not world space)
     // For uniform scale: mat3(view * model) is sufficient
@@ -30,5 +30,5 @@ void main() {
     mat3 normalMatrix = mat3(pc.view * pc.model);
     fragNormalView = normalize(normalMatrix * inNormal);
 
-    fragObjectID = pc.objectID;
+    fragObjectID = 0;
 }

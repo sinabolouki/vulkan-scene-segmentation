@@ -18,8 +18,10 @@ layout(set = 0, binding = 0, r32ui) uniform readonly uimage2D headPointerImage;
 struct FragmentNode {
     uint  color;
     float depth;       // Linear depth normalized to [0,1]
-    uint  normalXY;    // packHalf2x16(viewNormal.xy)
-    uint  objectID;    // Kept only because it is part of the collect-pass layout
+    float normalX;     // View-space normal X
+    float normalY;     // View-space normal Y
+    float normalZ;     // View-space normal Z
+    uint  objectID;
     uint  next;
 };
 
@@ -47,21 +49,18 @@ layout(push_constant) uniform PushConstants {
     float projY;          // projection[1][1]
 } pc;
 
-// The collect shader stores only normal.x and normal.y. Therefore the sign of
-// normal.z cannot be recovered. This pass only needs |normal.z| to estimate the
-// grazing angle, so reconstructing the positive magnitude is sufficient.
-vec3 unpackNormalWithAbsZ(uint packed) {
-    vec2 nxy = unpackHalf2x16(packed);
+// ─── Normal Reading ──────────────────────────────────────────────────────────
 
-    float xyLengthSquared = dot(nxy, nxy);
-    if (xyLengthSquared > 1.0) {
-        nxy *= inversesqrt(xyLengthSquared);
-        xyLengthSquared = 1.0;
+vec3 getNodeNormal(uint idx) {
+    vec3 n = vec3(nodes[idx].normalX, nodes[idx].normalY, nodes[idx].normalZ);
+    float len2 = dot(n, n);
+    if (len2 < 1e-12) {
+        return vec3(0.0, 0.0, -1.0); // fallback: facing camera
     }
-
-    float absNz = sqrt(max(1.0 - xyLengthSquared, 0.0));
-    return vec3(nxy, absNz);
+    return n * inversesqrt(len2);
 }
+
+// ─── View-Space Reconstruction ───────────────────────────────────────────────
 
 float viewDistanceFromStoredDepth(float normalizedLinearDepth) {
     return pc.nearPlane
@@ -69,10 +68,6 @@ float viewDistanceFromStoredDepth(float normalizedLinearDepth) {
          * (pc.farPlane - pc.nearPlane);
 }
 
-// Reconstructs a view-space position from pixel centre and stored linear depth.
-// A negative-height Vulkan viewport may mirror the y coordinate. That mirror
-// does not affect Euclidean distances as long as both samples use this same
-// reconstruction convention.
 vec3 reconstructViewPosition(ivec2 pixel, float normalizedLinearDepth) {
     float viewDistance = viewDistanceFromStoredDepth(normalizedLinearDepth);
 
@@ -101,12 +96,15 @@ vec2 viewPixelSize(float viewDistance) {
     );
 }
 
+// ─── Connection Cost ─────────────────────────────────────────────────────────
+//
 // Returns a normalized cost. Values <= 1 are considered connected.
 //
 // The allowed gap starts from the view-space footprint of the actual pixel
 // offset and is enlarged at grazing angles. It is capped to avoid connecting
 // unrelated surfaces merely because one normal is almost perpendicular to the
 // view direction.
+
 float connectionCost(
     uint idxA,
     uint idxB,
@@ -127,13 +125,18 @@ float connectionCost(
     float averageDistance = 0.5 * (distanceA + distanceB);
 
     ivec2 pixelOffset = pixelB - pixelA;
-    vec2 pixelSize = viewPixelSize(averageDistance);
-    float projectedStep = length(vec2(pixelOffset) * pixelSize);
-    projectedStep = max(projectedStep, 1e-7);
+    // vec2 pixelSize = viewPixelSize(averageDistance);
+    // float projectedStep = length(vec2(pixelOffset) * pixelSize);
+    // projectedStep = max(projectedStep, 1e-7);
+    vec3 posA_avg = reconstructViewPosition(pixelA, 0.5 * (depthA + depthB));
+    vec3 posB_avg = reconstructViewPosition(pixelB, 0.5 * (depthA + depthB));
+    float projectedStep = length(posB_avg - posA_avg);
 
-    vec3 normalA = unpackNormalWithAbsZ(nodes[idxA].normalXY);
-    vec3 normalB = unpackNormalWithAbsZ(nodes[idxB].normalXY);
+    vec3 normalA = getNodeNormal(idxA);
+    vec3 normalB = getNodeNormal(idxB);
 
+    // Use abs(nz) for grazing angle estimation.
+    // Now we have the true signed nz, but the grazing formula only needs magnitude.
     // 0.25 limits the grazing-angle amplification to 4x per surface.
     float expectedStepA = projectedStep / max(abs(normalA.z), 0.25);
     float expectedStepB = projectedStep / max(abs(normalB.z), 0.25);
@@ -146,18 +149,13 @@ float connectionCost(
     allowedGap = clamp(
         allowedGap,
         1.5 * projectedStep,
-        8.0 * projectedStep
+        12.0 * projectedStep
     );
-
-    // Preserve the old depthThreshold control as a small amount of additional
-    // view-space slack, but cap it so a large far/near range cannot merge
-    // distant objects accidentally.
-    float configuredSlack = max(pc.depthThreshold, 0.0)
-                          * (pc.farPlane - pc.nearPlane);
-    allowedGap += min(configuredSlack, 2.0 * projectedStep);
 
     return positionGap / max(allowedGap, 1e-7);
 }
+
+// ─── Union-Find ──────────────────────────────────────────────────────────────
 
 uint findRoot(uint x) {
     for (uint i = 0u; i < MAX_FIND_ITER; ++i) {
@@ -195,6 +193,8 @@ bool validNodeIndex(uint index, uint validNodeCount) {
     return index != NULL_IDX && index < validNodeCount;
 }
 
+// ─── Main ────────────────────────────────────────────────────────────────────
+
 void main() {
     ivec2 coordinate = ivec2(gl_FragCoord.xy);
 
@@ -226,8 +226,7 @@ void main() {
     }
 
     // For each local fragment, choose only its best geometrically continuous
-    // candidate in each neighboring list. The previous shader unioned every
-    // pair passing a loose test, which could bridge different depth layers.
+    // candidate in each neighboring list.
     for (int offsetY = -1; offsetY <= 1; ++offsetY) {
         for (int offsetX = -1; offsetX <= 1; ++offsetX) {
             if (offsetX == 0 && offsetY == 0) {
