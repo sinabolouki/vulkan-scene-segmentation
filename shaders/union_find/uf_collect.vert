@@ -22,8 +22,8 @@ void main() {
     vec4 worldPos = pc.model * vec4(inPosition, 1.0);
     gl_Position = pc.viewProj * worldPos;
 
-    fragColor = vec3(0.5f,0.5f,0.5f); // inColor; // Use a constant color for now
-
+    // fragColor = vec3(0.5f,0.5f,0.5f); 
+    fragColor = inColor;
     // Transform normal to VIEW space (not world space)
     // For uniform scale: mat3(view * model) is sufficient
     // For non-uniform scale you'd need inverse-transpose, but for a thesis prototype this is fine
