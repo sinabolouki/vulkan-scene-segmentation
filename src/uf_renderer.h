@@ -5,6 +5,8 @@
 #include <vector>
 #include <cstdint>
 
+#include "texture_manager.h"
+
 struct VulkanContext;
 class SwapchainManager;
 struct SceneObject;
@@ -19,7 +21,6 @@ struct UFFragmentNode {
     uint32_t objectID;   // Which object this fragment belongs to
     uint32_t next;       // Index of next node (0xFFFFFFFF = null)
 };
-// sizeof = 28 bytes (7 × 4 bytes, no padding issues with std430)
 
 class UFRenderer {
 public:
@@ -32,15 +33,16 @@ public:
     static constexpr uint32_t MAX_TIMESTAMPS = 40;
 
     // Runtime parameters (adjustable via ImGui)
-    // Runtime parameters (adjustable via ImGui)
-    float planeThreshold = 1.5f;    // Multiplier for tangent-plane test (× pixelStep)
-    float proximityScale = 3.0f;    // Multiplier for crease/edge proximity test (× pixelStep)
-    int debugDisplayLayer = -1;   // -1 = composite all, 0-3 = single layer
+    float planeThreshold = 1.5f;
+    float proximityScale = 3.0f;
+    int debugDisplayLayer = -1;
 
     float nearPlane = 0.1f;
     float farPlane = 100.0f;
 
-     struct TimingResults {
+    bool bypassUnionFind = false;
+
+    struct TimingResults {
         float clear = 0;
         float collect = 0;
         float sort = 0;
@@ -54,7 +56,7 @@ public:
             float resolve = 0;
             float total = 0;
         };
-        PeelTiming peels[NUM_LAYERS];  // per-peel (register + resolve)
+        PeelTiming peels[NUM_LAYERS];
         float composite = 0;
         float total = 0;
     };
@@ -63,6 +65,9 @@ public:
 
     bool isTimingReady() const { return m_timingReady; }
     void readTimingResults(VkDevice device);
+
+    // ─── Texture Manager ───
+    void setTextureManager(TextureManager* texMgr) { m_textureManager = texMgr; }
 
     // ─── Public Interface ───
     bool init(VulkanContext& context, SwapchainManager& swapchain);
@@ -139,7 +144,6 @@ private:
                             VkMemoryPropertyFlags properties);
 
     void computeTimingResults();
-
     void destroySizeDependent(VkDevice device);
 
     // ═══════════════════════════════════════════════════════════
@@ -151,6 +155,12 @@ private:
 
     float m_projX = 1.0f;
     float m_projY = 1.0f;
+
+    // ═══════════════════════════════════════════════════════════
+    // TEXTURE MANAGER (externally owned)
+    // ═══════════════════════════════════════════════════════════
+
+    TextureManager* m_textureManager = nullptr;
 
     // ═══════════════════════════════════════════════════════════
     // PPLL DATA STRUCTURES
@@ -178,7 +188,7 @@ private:
     VkDeviceMemory m_rootTableBufferMemory = VK_NULL_HANDLE;
 
     // ═══════════════════════════════════════════════════════════
-    // LAYER COLOR IMAGES (one per output layer)
+    // LAYER COLOR IMAGES
     // ═══════════════════════════════════════════════════════════
 
     struct LayerImage {
@@ -246,7 +256,10 @@ private:
     VkPipeline m_compositePipeline   = VK_NULL_HANDLE;
     VkPipeline m_registerRootsPipeline = VK_NULL_HANDLE;
 
+    // ═══════════════════════════════════════════════════════════
     // TIMESTAMPING
+    // ═══════════════════════════════════════════════════════════
+
     VkQueryPool m_timestampQueryPool = VK_NULL_HANDLE;
     float       m_timestampPeriod = 0.0f;
     uint64_t    m_timestamps[MAX_TIMESTAMPS] = {};

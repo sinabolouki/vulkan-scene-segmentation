@@ -43,8 +43,9 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
         return false;
 
     // Scene
-    std::string scenePath = "../assets/circles16.obj";
+    // std::string scenePath = "../assets/circles16.obj";
     // std::string scenePath = "../assets/simple_scene.obj";
+    std::string scenePath = "assets/sponza/sponza.obj";
     if (!m_scene.loadFromOBJ(scenePath))
     {
         std::cerr << "Failed to load scene: " << scenePath << std::endl;
@@ -54,6 +55,13 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
         return false;
 
     glfwSetKeyCallback(m_window, keyCallback);
+
+    // Textures (must happen BEFORE renderer init)
+    if (!loadTextures())
+        return false;
+
+    // Give texture manager to renderer
+    m_renderer.setTextureManager(&m_textureManager);
 
     // Renderer
     if (!m_renderer.init(m_context, m_swapchain))
@@ -184,6 +192,8 @@ void Application::drawFrame()
     m_renderer.debugDisplayLayer = layerIdx - 1;
 
     ImGui::Separator();
+    ImGui::Checkbox("Bypass Union-Find (show front only)", &m_renderer.bypassUnionFind);
+
 
     // ─── Debug Info ───
     if (ImGui::CollapsingHeader("Debug Info")) {
@@ -210,6 +220,21 @@ void Application::drawFrame()
     int layerIdx = m_renderer.debugDisplayLayer + 1; // -1 → 0, 0→1, etc.
     ImGui::Combo("Display", &layerIdx, layerNames, 5);
     m_renderer.debugDisplayLayer = layerIdx - 1;
+    ImGui::End();
+#elif defined(RENDER_METHOD_SIMPLE)
+    ImGui::Begin("Simple Renderer");
+    ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameTimeMs);
+    ImGui::Separator();
+    ImGui::Text("Scene: %s", "sponza");
+    ImGui::Text("Objects: %u", (uint32_t)m_scene.getObjects().size());
+    ImGui::Text("Vertices: %u", m_scene.getTotalVertexCount());
+    ImGui::Text("Triangles: %u", m_scene.getTotalIndexCount() / 3);
+    ImGui::Text("Textures: %u", m_textureManager.getTextureCount());
+    ImGui::Separator();
+    ImGui::Text("Camera distance: %.2f", m_camera.distance);
+    ImGui::Text("Near/Far: %.3f / %.1f", m_renderer.nearPlane, m_renderer.farPlane);
+    ImGui::Text("CameraPos: %.3f , %.3f , %.3f", m_camera.position.x, m_camera.position.y, m_camera.position.z);
+    ImGui::Text("CameraTarget: %.3f , %.3f , %.3f", m_camera.target.x, m_camera.target.y, m_camera.target.z);
     ImGui::End();
 #endif
     // ─── End ImGui UI ───
@@ -276,6 +301,7 @@ void Application::drawFrame()
 // Add the callback implementation:
 void Application::keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods)
 {
+    #ifndef RENDER_METHOD_SIMPLE
     if (action != GLFW_PRESS)
         return;
 
@@ -304,6 +330,7 @@ void Application::keyCallback(GLFWwindow *window, int key, int scancode, int act
             break; // Layer 3
         }
     }
+    #endif
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -326,6 +353,7 @@ void Application::cleanup()
     vkDeviceWaitIdle(device);
 
     m_imguiManager.destroy(device);
+    m_textureManager.destroy(m_context.device);
     m_renderer.destroy(device);
 
     vkDestroyBuffer(device, m_indexBuffer, nullptr);
@@ -438,8 +466,9 @@ void Application::initCamera() {
     glm::vec3 center = m_scene.getCenter();
     float radius = m_scene.getRadius();
 
-    m_camera.target = center;
-    m_camera.distance = radius * 2.5f;
+    // m_camera.target = center;
+    m_camera.target = glm::vec3(40.0f,119.0f,-31.5f);
+    m_camera.distance = radius * 0.1f;
     m_camera.yaw = 0.0f;
     m_camera.pitch = 0.3f;
     m_camera.updateFromOrbit();
@@ -494,4 +523,24 @@ void Application::updateCamera() {
         m_camera.distance = glm::max(m_camera.distance, 0.01f);
         m_camera.updateFromOrbit();
     }
+}
+
+bool Application::loadTextures() {
+    if (!m_textureManager.init(m_context)) {
+        std::cerr << "[App] Failed to init texture manager" << std::endl;
+        return false;
+    }
+
+    auto texturePaths = m_scene.getTextureFilenames();
+    std::cout << "[App] Found " << texturePaths.size() << " textures to load" << std::endl;
+
+    if (!texturePaths.empty()) {
+        if (!m_textureManager.loadTextures(m_context, texturePaths)) {
+            std::cerr << "[App] Failed to load textures" << std::endl;
+            return false;
+        }
+        m_scene.resolveTextureIndices(m_textureManager.getLoadedPaths());
+    }
+
+    return true;
 }

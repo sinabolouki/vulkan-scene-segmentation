@@ -2,14 +2,16 @@
 
 // CHOOSE RENDERING METHOD (uncomment ONE):
 // #define RENDER_METHOD_PPLL              // Per-Pixel Linked List
-// #define RENDER_METHOD_DEPTH_PEELING   // Depth Peeling
-#define RENDER_METHOD_UNION_FIND
+// #define RENDER_METHOD_DEPTH_PEELING     // Depth Peeling
+// #define RENDER_METHOD_UNION_FIND        // Union-Find PPLL
+#define RENDER_METHOD_SIMPLE              // Simple forward (for testing)
 
 #include "vulkan_context.h"
 #include "swapchain_manager.h"
 #include "scene.h"
 #include "push_constants.h"
 #include "mesh.h"
+#include "texture_manager.h"
 
 #ifdef RENDER_METHOD_DEPTH_PEELING
 #include "depth_peeling_renderer.h"
@@ -17,6 +19,8 @@
 #include "ppll_renderer.h"
 #elif defined(RENDER_METHOD_UNION_FIND)
 #include "uf_renderer.h"
+#elif defined(RENDER_METHOD_SIMPLE)
+#include "simple_renderer.h"
 #else
 #error "No render method defined! Uncomment one in application.h"
 #endif
@@ -93,7 +97,12 @@ private:
     PPLLRenderer m_renderer;
 #elif defined(RENDER_METHOD_UNION_FIND)
     UFRenderer m_renderer;
+#elif defined(RENDER_METHOD_SIMPLE)
+    SimpleRenderer m_renderer;
 #endif
+
+    // Texture Manager (shared across renderers)
+    TextureManager m_textureManager;
 
     ImGuiManager m_imguiManager;
 
@@ -122,6 +131,7 @@ private:
     bool createCommandPool();
     bool createCommandBuffers();
     bool uploadSceneToGPU();
+    bool loadTextures();
 
     // Frame
     void drawFrame();

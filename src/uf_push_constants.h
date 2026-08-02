@@ -11,13 +11,14 @@ struct UFScenePushConstants {
     uint32_t  objectID;    // 4 bytes
     float     nearPlane;   // 4 bytes
     float     farPlane;    // 4 bytes
-    float     padding;     // 4 bytes (align to 16)
+    int32_t   textureIndex;// 4 bytes (-1 = no texture, use vertex color only)
 };
+// Total: 208 bytes
 
 // Push constants for all fullscreen passes
 struct UFFullscreenPushConstants {
-    float    planeThreshold;   // Tangent-plane residual tolerance (e.g. 1.5)
-    float    proximityScale;   // Proximity fallback multiplier (e.g. 3.0)
+    float    planeThreshold;
+    float    proximityScale;
     uint32_t screenWidth;
     uint32_t screenHeight;
     uint32_t targetLayer;

@@ -12,7 +12,7 @@ bool VulkanContext::init(GLFWwindow* window) {
         .build();
 
     if (!instance_result) {
-        std::cerr << "Failed to create Vulkan instance: " 
+        std::cerr << "Failed to create Vulkan instance: "
                   << instance_result.error().message() << std::endl;
         return false;
     }
@@ -29,6 +29,7 @@ bool VulkanContext::init(GLFWwindow* window) {
 
     VkPhysicalDeviceFeatures features{};
     features.fragmentStoresAndAtomics = VK_TRUE;
+    features.samplerAnisotropy = VK_TRUE;  // ← FIX: needed for texture sampler
 
     // ─── Physical Device ───
     vkb::PhysicalDeviceSelector phys_selector(vkb_instance);
@@ -37,11 +38,11 @@ bool VulkanContext::init(GLFWwindow* window) {
         .set_minimum_version(1, 3)
         .set_required_features(features)
         .prefer_gpu_device_type(vkb::PreferredDeviceType::discrete)
-        .require_dedicated_transfer_queue()
+        // ← FIX: removed require_dedicated_transfer_queue()
         .select();
 
     if (!phys_result) {
-        std::cerr << "Failed to select physical device: " 
+        std::cerr << "Failed to select physical device: "
                   << phys_result.error().message() << std::endl;
         return false;
     }
@@ -54,7 +55,7 @@ bool VulkanContext::init(GLFWwindow* window) {
     auto device_result = device_builder.build();
 
     if (!device_result) {
-        std::cerr << "Failed to create logical device: " 
+        std::cerr << "Failed to create logical device: "
                   << device_result.error().message() << std::endl;
         return false;
     }
@@ -78,6 +79,15 @@ bool VulkanContext::init(GLFWwindow* window) {
     }
     present_queue = pq.value();
 
+    // ─── Command Pool ───  ← FIX: create a general-purpose command pool
+    VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = graphics_queue_family;
+    if (vkCreateCommandPool(device, &poolInfo, nullptr, &command_pool) != VK_SUCCESS) {
+        std::cerr << "Failed to create command pool in VulkanContext" << std::endl;
+        return false;
+    }
+
     std::cout << "Vulkan context initialized successfully." << std::endl;
     std::cout << "GPU: " << vkb_physical_device.name << std::endl;
 
@@ -85,6 +95,9 @@ bool VulkanContext::init(GLFWwindow* window) {
 }
 
 void VulkanContext::destroy() {
+    if (command_pool != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(device, command_pool, nullptr);
+    }
     if (device != VK_NULL_HANDLE) {
         vkDestroyDevice(device, nullptr);
     }

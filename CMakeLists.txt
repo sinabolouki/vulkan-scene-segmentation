@@ -64,10 +64,13 @@ endforeach()
 add_custom_target(compile_shaders ALL DEPENDS ${SPIRV_OUTPUTS})
 add_dependencies(${PROJECT_NAME} compile_shaders)
 
+file(GLOB_RECURSE ASSET_FILES "${CMAKE_SOURCE_DIR}/assets/*")
+
 add_custom_target(copy_assets ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_SOURCE_DIR}/assets"
         "${CMAKE_BINARY_DIR}/assets"
+    DEPENDS ${ASSET_FILES}
     COMMENT "Copying assets/ to build directory"
 )
 

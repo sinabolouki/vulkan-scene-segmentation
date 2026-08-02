@@ -13,6 +13,7 @@ struct VulkanContext {
     VkQueue graphics_queue = VK_NULL_HANDLE;
     uint32_t graphics_queue_family = 0;
     VkQueue present_queue = VK_NULL_HANDLE;
+    VkCommandPool command_pool = VK_NULL_HANDLE;  // ← ADD THIS
 
     bool init(GLFWwindow* window);
     void destroy();

@@ -1,8 +1,9 @@
 #version 450
 
 layout(location = 0) in vec3 fragColor;
-layout(location = 1) in vec3 fragNormalView;   // View-space normal
+layout(location = 1) in vec3 fragNormalView;
 layout(location = 2) flat in uint fragObjectID;
+layout(location = 3) in vec2 fragUV;
 
 layout(push_constant) uniform PushConstants {
     mat4 model;
@@ -11,20 +12,20 @@ layout(push_constant) uniform PushConstants {
     uint objectID;
     float nearPlane;
     float farPlane;
+    int  textureIndex;
 } pc;
 
 layout(set = 0, binding = 0, r32ui) uniform coherent uimage2D headPointerImage;
 
 struct FragmentNode {
-    uint  color;       // Packed RGBA8
-    float depth;       // Linear normalized depth [0, 1]
-    float normalX;     // View-space normal X
-    float normalY;     // View-space normal Y
-    float normalZ;     // View-space normal Z
+    uint  color;
+    float depth;
+    float normalX;
+    float normalY;
+    float normalZ;
     uint  objectID;
     uint  next;
 };
-// 7 × 4 bytes = 28 bytes per node
 
 layout(set = 0, binding = 1, std430) buffer NodeBuffer {
     FragmentNode nodes[];
@@ -34,7 +35,10 @@ layout(set = 0, binding = 2, std430) buffer AtomicCounter {
     uint counter;
 };
 
-// ─── Packing Helper ──────────────────────────────────────────────────────────
+// Texture array (set 1, binding 0)
+layout(set = 1, binding = 0) uniform sampler2D textures[64];
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 uint packColor(vec4 color) {
     uint r = uint(clamp(color.r, 0.0, 1.0) * 255.0);
@@ -51,12 +55,26 @@ float linearizeDepth(float z) {
 void main() {
     vec3 normal = normalize(fragNormalView);
 
-    // Simple diffuse lighting
+    // ─── Material color ──────────────────────────────────────────────────
+    vec3 baseColor = fragColor; // Material Kd baked into vertex color
+
+    // Sample texture if available
+    if (pc.textureIndex >= 0) {
+        vec4 texColor = texture(textures[pc.textureIndex], fragUV);
+        baseColor *= texColor.rgb;
+
+        // Alpha test: discard nearly-transparent pixels (e.g. Sponza leaves)
+        if (texColor.a < 0.5) {
+            discard;
+        }
+    }
+
+    // ─── Lighting ────────────────────────────────────────────────────────
     vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
     float diffuse = max(dot(normal, lightDir), 0.0) * 0.7 + 0.3;
-    vec4 finalColor = vec4(fragColor * diffuse, 1.0);
+    vec4 finalColor = vec4(baseColor * diffuse, 1.0);
 
-    // Allocate node
+    // ─── Allocate node ───────────────────────────────────────────────────
     uint nodeIndex = atomicAdd(counter, 1u);
     if (nodeIndex >= nodes.length()) {
         return;
@@ -66,7 +84,7 @@ void main() {
     ivec2 pixelCoord = ivec2(gl_FragCoord.xy);
     uint prevHead = imageAtomicExchange(headPointerImage, pixelCoord, nodeIndex);
 
-    // Linearize depth: convert to [0, 1] range in LINEAR space
+    // Linearize depth
     float linDepth = linearizeDepth(gl_FragCoord.z);
     float normalizedDepth = (linDepth - pc.nearPlane) / (pc.farPlane - pc.nearPlane);
 

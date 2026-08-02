@@ -7,8 +7,6 @@
 //   1. Their normals are compatible AND each lies on the other's tangent plane
 //   2. Their normals are incompatible (crease) AND they are spatially close
 //
-// This avoids the pixel-footprint estimation entirely for the primary test,
-// eliminating screen-edge and near-camera artifacts.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #define NULL_IDX       0xFFFFFFFFu
@@ -78,7 +76,6 @@ vec3 reconstructViewPosition(ivec2 pixel, float normalizedLinearDepth) {
 }
 
 // Compute the actual 3D distance between two pixel centers at a reference depth.
-// This replaces the broken viewPixelSize() and is correct at all screen positions.
 float computePixelStep(ivec2 pixelA, ivec2 pixelB, float refDepth) {
     vec3 refA = reconstructViewPosition(pixelA, refDepth);
     vec3 refB = reconstructViewPosition(pixelB, refDepth);
@@ -118,8 +115,8 @@ bool shouldConnect(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
         float maxResidual = max(residualA, residualB);
 
         // Threshold: planeThreshold scaled by the pixel step.
-        // A flat surface has residual ≈ 0 regardless of angle.
-        // A curved surface has residual ∝ curvature × pixelStep².
+        // A flat surface has residual -> 0 regardless of angle.
+        // A curved surface has residual -> curvature x pixelStep².
         // We allow a small multiple of pixelStep to handle mild curvature.
         float threshold = pc.planeThreshold * pixelStep;
 

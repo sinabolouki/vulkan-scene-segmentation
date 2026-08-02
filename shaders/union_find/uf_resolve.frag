@@ -101,10 +101,10 @@ vec4 resolveAndAdvance(ivec2 coord) {
     if (isRootInFront(root)) {
         // This fragment is part of the current peel's front layer
         if (!rendered) {
-            // result = unpackColor(nodes[idx].color);
-            result = (targetLayer < 9u)
-                ? LAYER_COLORS[targetLayer]
-                : vec4(1.0, 0.0, 1.0, 1.0);
+            result = unpackColor(nodes[idx].color);
+            // result = (targetLayer < 9u)
+            //     ? LAYER_COLORS[targetLayer]
+            //     : vec4(1.0, 0.0, 1.0, 1.0);
             rendered = true;
         }
         // Continue past it
