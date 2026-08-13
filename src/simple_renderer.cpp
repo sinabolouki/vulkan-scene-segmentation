@@ -323,13 +323,13 @@ void SimpleRenderer::recordCommands(VkCommandBuffer cmd,
 
     // ─── Begin Render Pass ───────────────────────────────────────────────
     std::array<VkClearValue, 2> clearValues{};
-    clearValues[0].color = {{0.02f, 0.02f, 0.08f, 1.0f}};
+    clearValues[0].color = { {0.02f, 0.02f, 0.08f, 1.0f} };
     clearValues[1].depthStencil = {1.0f, 0};
 
     VkRenderPassBeginInfo rpBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rpBegin.renderPass = m_renderPass;
     rpBegin.framebuffer = m_framebuffers[swapchainImageIndex];
-    rpBegin.renderArea = {{0, 0}, {m_width, m_height}};
+    rpBegin.renderArea = { {0, 0}, {m_width, m_height} };
     rpBegin.clearValueCount = (uint32_t)clearValues.size();
     rpBegin.pClearValues = clearValues.data();
 
@@ -348,7 +348,7 @@ void SimpleRenderer::recordCommands(VkCommandBuffer cmd,
     vp.maxDepth = 1.0f;
     vkCmdSetViewport(cmd, 0, 1, &vp);
 
-    VkRect2D scissor{{0, 0}, {m_width, m_height}};
+    VkRect2D scissor{ {0, 0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
     // ─── Bind Texture Descriptor Set (set 0) ────────────────────────────

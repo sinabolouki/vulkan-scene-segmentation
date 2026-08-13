@@ -45,7 +45,8 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
     // Scene
     // std::string scenePath = "../assets/circles16.obj";
     // std::string scenePath = "../assets/simple_scene.obj";
-    std::string scenePath = "assets/sponza/sponza.obj";
+    // std::string scenePath = "assets/sponza/sponza.obj";
+    std::string scenePath = "assets/simple_room/simple_room.obj";
     if (!m_scene.loadFromOBJ(scenePath))
     {
         std::cerr << "Failed to load scene: " << scenePath << std::endl;
@@ -148,6 +149,13 @@ void Application::drawFrame()
         ImGui::SetTooltip("Proximity fallback for sharp edges/creases (x pixelStep).\n"
                           "Higher = merges cube edges more aggressively.\n"
                           "Lower = may split objects at sharp creases.");
+
+    ImGui::SliderFloat("Color Threshold", &m_renderer.colorThreshold, 0.05f, 1.5f, "%.2f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Chromaticity distance veto.\n"
+                        "Lower = stricter (splits at subtle color changes).\n"
+                        "Higher = more permissive (only rejects very different materials).\n"
+                        "0.4 = good default for textured scenes.");
 
     ImGui::Separator();
 
@@ -467,8 +475,9 @@ void Application::initCamera() {
     float radius = m_scene.getRadius();
 
     // m_camera.target = center;
-    m_camera.target = glm::vec3(40.0f,119.0f,-31.5f);
-    m_camera.distance = radius * 0.1f;
+    m_camera.target = glm::vec3(-7.493f,5.453f,-3.652f);
+    // m_camera.distance = radius * 0.1f;
+    m_camera.distance = 2.74f;
     m_camera.yaw = 0.0f;
     m_camera.pitch = 0.3f;
     m_camera.updateFromOrbit();

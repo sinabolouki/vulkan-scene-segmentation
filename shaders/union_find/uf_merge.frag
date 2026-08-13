@@ -1,12 +1,20 @@
 #version 450
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Union-Find Merge Pass — Dual-Criterion Connectivity
+// Union-Find Merge Pass — Soft-Cost Connectivity (4-neighborhood)
 //
-// Two fragments are merged if EITHER:
-//   1. Their normals are compatible AND each lies on the other's tangent plane
-//   2. Their normals are incompatible (crease) AND they are spatially close
+// Instead of two disjoint hard tests (tangent-plane OR proximity), all signals
+// are combined into a single scalar cost:
 //
+//   cost = w_plane  * planeResidual  / (planeThreshold  * pixelStep)
+//        + w_normal * (1 - normalDot) * 0.5
+//        + w_depth  * |depthA-depthB| / (proximityScale * pixelStep)
+//
+// Each term is normalized so that "1.0" means "right at the threshold".
+// Two fragments are merged if cost < 1.0.
+//
+// The neighborhood is the symmetric 4-set { N, W, NW, NE } — every adjacent
+// pair is still considered exactly once due to union symmetry.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #define NULL_IDX       0xFFFFFFFFu
@@ -38,8 +46,8 @@ layout(set = 0, binding = 3, std430) coherent buffer ParentBuffer {
 };
 
 layout(push_constant) uniform PushConstants {
-    float planeThreshold;    // Max tangent-plane residual (world units), e.g. 0.05
-    float proximityScale;    // Multiplier for proximity fallback, e.g. 3.0
+    float planeThreshold;    // Reference plane-residual scale, e.g. 0.05
+    float proximityScale;    // Reference proximity scale, e.g. 3.0
     uint  screenWidth;
     uint  screenHeight;
     uint  targetLayer;       // Unused in merge
@@ -47,7 +55,15 @@ layout(push_constant) uniform PushConstants {
     float farPlane;
     float projX;             // projection[0][0]
     float projY;             // projection[1][1]
+    float colorThreshold;
 } pc;
+
+// ─── Soft-cost weights (tune here or promote to push constants) ─────────────
+const float W_PLANE       = 1.0;
+const float W_NORMAL      = 1.0;
+const float W_DEPTH       = 1.0;
+const float W_COLOR       = 0.5; 
+const float COST_THRESHOLD = 1.0;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -75,17 +91,44 @@ vec3 reconstructViewPosition(ivec2 pixel, float normalizedLinearDepth) {
     );
 }
 
-// Compute the actual 3D distance between two pixel centers at a reference depth.
 float computePixelStep(ivec2 pixelA, ivec2 pixelB, float refDepth) {
     vec3 refA = reconstructViewPosition(pixelA, refDepth);
     vec3 refB = reconstructViewPosition(pixelB, refDepth);
     return length(refB - refA);
 }
 
-// ─── Connectivity Decision ───────────────────────────────────────────────────
+// ─── Color Helpers (unused right now, kept for future re-enable) ────────────
 
-// Returns true if the two fragments should be connected.
-bool shouldConnect(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
+vec3 unpackColorRGB(uint packed) {
+    return vec3(
+        float(packed & 0xFFu) / 255.0,
+        float((packed >> 8u) & 0xFFu) / 255.0,
+        float((packed >> 16u) & 0xFFu) / 255.0
+    );
+}
+
+float colorDistance(uint packedA, uint packedB) {
+    vec3 colorA = unpackColorRGB(packedA);
+    vec3 colorB = unpackColorRGB(packedB);
+
+    float lumA = dot(colorA, vec3(0.299, 0.587, 0.114));
+    float lumB = dot(colorB, vec3(0.299, 0.587, 0.114));
+
+    if (lumA < 0.02 && lumB < 0.02) return 0.0;
+    if (min(lumA, lumB) < 0.02)     return abs(lumA - lumB);
+
+    vec3 chromA = colorA / max(lumA, 0.01);
+    vec3 chromB = colorB / max(lumB, 0.01);
+
+    return length(chromA - chromB);
+}
+
+// ─── Soft-Cost Connectivity ─────────────────────────────────────────────────
+//
+// Returns a normalized cost. cost < COST_THRESHOLD (= 1.0) means "accept".
+// A rejected pair returns 1e30 so it can never win best-neighbor selection.
+
+float connectionCost(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
     float depthA = nodes[idxA].depth;
     float depthB = nodes[idxB].depth;
 
@@ -98,43 +141,40 @@ bool shouldConnect(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
 
     float normalDot = dot(normalA, normalB);
 
-    // ─── Adaptive threshold from actual pixel spacing ─────────────────────
-    // Use average depth as reference to get the local pixel footprint.
-    // This is correct at screen edges because it uses reconstructViewPosition.
+    // Adaptive spatial scale from actual pixel spacing at this depth
     float refDepth = 0.5 * (depthA + depthB);
     float pixelStep = computePixelStep(pixelA, pixelB, refDepth);
 
-    // ─── Case 1: Compatible normals → tangent-plane test ──────────────────
+    // ── Term 1: normal deviation ─────────────────────────────────────────
+    float normalTerm = (1.0 - normalDot) * 0.5;
+
+    // ── Term 2: depth-space proximity ────────────────────────────────────
+    float depthDelta = length(delta);
+    float depthTerm  = depthDelta / max(pc.proximityScale * pixelStep, 1e-6);
+
+    // ── Term 3: tangent-plane residual ───────────────────────────────────
+    float planeTerm;
     if (normalDot > 0.25) {
-        // How far is B from A's tangent plane?
-        float residualA = abs(dot(normalA, delta));
-        // How far is A from B's tangent plane?
-        float residualB = abs(dot(normalB, -delta));
-
-        // Use the larger residual (more conservative)
+        float residualA   = abs(dot(normalA,  delta));
+        float residualB   = abs(dot(normalB, -delta));
         float maxResidual = max(residualA, residualB);
-
-        // Threshold: planeThreshold scaled by the pixel step.
-        // A flat surface has residual -> 0 regardless of angle.
-        // A curved surface has residual -> curvature x pixelStep².
-        // We allow a small multiple of pixelStep to handle mild curvature.
-        float threshold = pc.planeThreshold * pixelStep;
-
-        return maxResidual < threshold;
+        planeTerm = maxResidual / max(pc.planeThreshold * pixelStep, 1e-6);
+    } else {
+        planeTerm = 0.0;
     }
 
-    // ─── Case 2: Incompatible normals → proximity test ────────────────────
-    // This handles sharp creases (cube edges, hard surface joins).
-    // Fragments at a shared edge are at essentially the same position.
-    else {
-        float dist = length(delta);
+    // ── Term 4: color dissimilarity ──────────────────────────────────────
+    float colDist = colorDistance(nodes[idxA].color, nodes[idxB].color);
+    float colorTerm = colDist / max(pc.colorThreshold, 1e-6);
 
-        // Allow a more generous distance for creases.
-        // proximityScale controls how many "pixel steps" apart they can be.
-        float threshold = pc.proximityScale * pixelStep;
+    // ── Combined cost ────────────────────────────────────────────────────
+    float cost = W_PLANE  * planeTerm
+               + W_NORMAL * normalTerm
+               + W_DEPTH  * depthTerm
+               + W_COLOR  * colorTerm;
 
-        return dist < threshold;
-    }
+    if (cost >= COST_THRESHOLD) return 1e30;
+    return cost;
 }
 
 // ─── Union-Find ──────────────────────────────────────────────────────────────
@@ -196,52 +236,51 @@ void main() {
 
     if (localCount == 0u) return;
 
-    // ─── Compare with 8 neighbors ────────────────────────────────────────
-    for (int offsetY = -1; offsetY <= 1; ++offsetY) {
-        for (int offsetX = -1; offsetX <= 1; ++offsetX) {
-            if (offsetX == 0 && offsetY == 0) continue;
+    // ─── Symmetric 4-neighborhood: N, W, NW, NE ──────────────────────────
+    // Every adjacent pair is visited exactly once because unions are
+    // symmetric — the "other" pixel of the pair would only add duplicates.
+    const ivec2 offsets[4] = ivec2[4](
+        ivec2( 0, -1),   // N
+        ivec2(-1,  0),   // W
+        ivec2(-1, -1),   // NW
+        ivec2( 1, -1)    // NE
+    );
 
-            ivec2 neighborCoordinate = coordinate + ivec2(offsetX, offsetY);
+    for (int dir = 0; dir < 4; ++dir) {
+        ivec2 neighborCoordinate = coordinate + offsets[dir];
 
-            if (neighborCoordinate.x < 0 || neighborCoordinate.y < 0 ||
-                neighborCoordinate.x >= int(pc.screenWidth) ||
-                neighborCoordinate.y >= int(pc.screenHeight)) {
-                continue;
+        if (neighborCoordinate.x < 0 || neighborCoordinate.y < 0 ||
+            neighborCoordinate.x >= int(pc.screenWidth) ||
+            neighborCoordinate.y >= int(pc.screenHeight)) {
+            continue;
+        }
+
+        // For each local fragment, find the best (lowest-cost) connectable neighbor
+        for (uint local = 0u; local < localCount; ++local) {
+
+            uint  bestNeighbor = NULL_IDX;
+            float bestCost     = COST_THRESHOLD;   // any accepted cost is < this
+
+            uint neighborIndex = imageLoad(headPointerImage, neighborCoordinate).r;
+            uint neighborCount = 0u;
+
+            while (validNodeIndex(neighborIndex, validNodeCount) &&
+                   neighborCount < MAX_FRAGS) {
+
+                float cost = connectionCost(localFragments[local], neighborIndex,
+                                            coordinate, neighborCoordinate);
+
+                if (cost < bestCost) {
+                    bestCost     = cost;
+                    bestNeighbor = neighborIndex;
+                }
+
+                neighborIndex = nodes[neighborIndex].next;
+                ++neighborCount;
             }
 
-            // For each local fragment, find the best connectable neighbor
-            for (uint local = 0u; local < localCount; ++local) {
-
-                uint bestNeighbor = NULL_IDX;
-                float bestDist = 1e30;
-
-                uint neighborIndex = imageLoad(headPointerImage, neighborCoordinate).r;
-                uint neighborCount = 0u;
-
-                while (validNodeIndex(neighborIndex, validNodeCount) &&
-                       neighborCount < MAX_FRAGS) {
-
-                    if (shouldConnect(localFragments[local], neighborIndex,
-                                      coordinate, neighborCoordinate)) {
-                        // Among all connectable neighbors, pick the closest in depth
-                        // to avoid merging across layers when multiple candidates pass
-                        float dA = nodes[localFragments[local]].depth;
-                        float dB = nodes[neighborIndex].depth;
-                        float depthDist = abs(dA - dB);
-
-                        if (depthDist < bestDist) {
-                            bestDist = depthDist;
-                            bestNeighbor = neighborIndex;
-                        }
-                    }
-
-                    neighborIndex = nodes[neighborIndex].next;
-                    ++neighborCount;
-                }
-
-                if (bestNeighbor != NULL_IDX) {
-                    unionSets(localFragments[local], bestNeighbor);
-                }
+            if (bestNeighbor != NULL_IDX) {
+                unionSets(localFragments[local], bestNeighbor);
             }
         }
     }

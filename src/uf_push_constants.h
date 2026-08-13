@@ -26,7 +26,7 @@ struct UFFullscreenPushConstants {
     float    farPlane;
     float    projX;
     float    projY;
-    float    pad0;
+    float    colorThreshold;
 };
 
 // Push constants for composite pass

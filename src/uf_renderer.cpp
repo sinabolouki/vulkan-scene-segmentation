@@ -164,7 +164,7 @@ bool UFRenderer::createDataStructures(VulkanContext &context)
 
     // Atomic counter (4 bytes)
     if (!createBuffer(context, sizeof(uint32_t),
-                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                       m_atomicCounterBuffer, m_atomicCounterMemory))
         return false;
 
@@ -179,6 +179,30 @@ bool UFRenderer::createDataStructures(VulkanContext &context)
                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                       m_rootTableBuffer, m_rootTableBufferMemory))
         return false;
+
+    {
+        VkBufferCreateInfo bufInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bufInfo.size = sizeof(uint32_t);
+        bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateBuffer(context.device, &bufInfo, nullptr, &m_counterStagingBuffer) != VK_SUCCESS)
+            return false;
+
+        VkMemoryRequirements memReq;
+        vkGetBufferMemoryRequirements(context.device, m_counterStagingBuffer, &memReq);
+
+        VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocInfo.allocationSize = memReq.size;
+        allocInfo.memoryTypeIndex = findMemoryType(context.physical_device, memReq.memoryTypeBits,
+                                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        if (vkAllocateMemory(context.device, &allocInfo, nullptr, &m_counterStagingMemory) != VK_SUCCESS)
+            return false;
+
+        vkBindBufferMemory(context.device, m_counterStagingBuffer, m_counterStagingMemory, 0);
+        vkMapMemory(context.device, m_counterStagingMemory, 0, sizeof(uint32_t), 0, &m_counterStagingMapped);
+    }
 
     return true;
 }
@@ -887,6 +911,22 @@ void UFRenderer::destroySizeDependent(VkDevice device)
     }
     m_nodeCapacity = 0;
 
+    if (m_counterStagingBuffer)
+    {
+        if (m_counterStagingMapped)
+        {
+            vkUnmapMemory(device, m_counterStagingMemory);
+            m_counterStagingMapped = nullptr;
+        }
+        vkDestroyBuffer(device, m_counterStagingBuffer, nullptr);
+        m_counterStagingBuffer = VK_NULL_HANDLE;
+    }
+    if (m_counterStagingMemory)
+    {
+        vkFreeMemory(device, m_counterStagingMemory, nullptr);
+        m_counterStagingMemory = VK_NULL_HANDLE;
+    }
+
     if (m_atomicCounterBuffer)
     {
         vkDestroyBuffer(device, m_atomicCounterBuffer, nullptr);
@@ -976,6 +1016,21 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
     m_projY = projection[1][1];
 
     readTimingResults(context.device);
+    if (m_counterStagingMapped)
+    {
+        uint32_t fragCount = *reinterpret_cast<uint32_t *>(m_counterStagingMapped);
+        debugStats.fragmentCount = fragCount;
+        debugStats.nodeCapacity = m_nodeCapacity;
+        debugStats.overflowed = (fragCount >= m_nodeCapacity);
+        debugStats.usage = (m_nodeCapacity > 0) ? (float(fragCount) / float(m_nodeCapacity)) * 100.0f : 0.0f;
+
+        if (debugStats.overflowed)
+        {
+            std::cerr << "[UF] ⚠️  NODE BUFFER OVERFLOW: " << fragCount
+                      << " / " << m_nodeCapacity << " ("
+                      << debugStats.usage << "%)" << std::endl;
+        }
+    }
     m_timestampCount = 0;
 
     if (enableTiming)
@@ -1001,7 +1056,13 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
     recordCollectPhase(cmd, vertexBuffer, indexBuffer, objects, viewProj, view);
     recordMemoryBarrier(cmd,
                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT);
+
+    // Copy atomic counter to staging buffer for CPU readback next frame
+    VkBufferCopy copyRegion{};
+    copyRegion.size = sizeof(uint32_t);
+    vkCmdCopyBuffer(cmd, m_atomicCounterBuffer, m_counterStagingBuffer, 1, &copyRegion);
     stamp(); // [2] after collect
 
     recordSortPhase(cmd);
@@ -1338,6 +1399,7 @@ void UFRenderer::recordMergePhase(VkCommandBuffer cmd)
     pc.farPlane = farPlane;
     pc.projX = m_projX;
     pc.projY = m_projY;
+    pc.colorThreshold = colorThreshold;
     vkCmdPushConstants(cmd, m_fullscreenPipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
 

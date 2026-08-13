@@ -22,10 +22,11 @@ struct UFFragmentNode {
     uint32_t next;       // Index of next node (0xFFFFFFFF = null)
 };
 
+
 class UFRenderer {
 public:
     // ─── Configuration ───
-    static constexpr uint32_t AVG_FRAGS_PER_PIXEL = 8;
+    static constexpr uint32_t AVG_FRAGS_PER_PIXEL = 16;
     static constexpr uint32_t MAX_FRAGS_PER_PIXEL = 32;
     static constexpr uint32_t NUM_LAYERS = 8;
     static constexpr uint32_t UF_NULL = 0xFFFFFFFF;
@@ -35,6 +36,7 @@ public:
     // Runtime parameters (adjustable via ImGui)
     float planeThreshold = 1.5f;
     float proximityScale = 3.0f;
+    float colorThreshold = 0.4f;
     int debugDisplayLayer = -1;
 
     float nearPlane = 0.1f;
@@ -62,6 +64,14 @@ public:
     };
     TimingResults timingResults;
     bool enableTiming = true;
+
+    struct DebugStats {
+        uint32_t fragmentCount = 0;
+        uint32_t nodeCapacity = 0;
+        bool     overflowed = false;
+        float    usage = 0.0f;  // percentage
+    };
+    DebugStats debugStats;
 
     bool isTimingReady() const { return m_timingReady; }
     void readTimingResults(VkDevice device);
@@ -265,4 +275,8 @@ private:
     uint64_t    m_timestamps[MAX_TIMESTAMPS] = {};
     uint32_t    m_timestampCount = 0;
     bool        m_timingReady = false;
+
+    VkBuffer       m_counterStagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_counterStagingMemory = VK_NULL_HANDLE;
+    void*          m_counterStagingMapped = nullptr;  // Persistently mapped
 };
