@@ -28,9 +28,9 @@ public:
     // ─── Configuration ───
     static constexpr uint32_t AVG_FRAGS_PER_PIXEL = 16;
     static constexpr uint32_t MAX_FRAGS_PER_PIXEL = 32;
-    static constexpr uint32_t NUM_LAYERS = 8;
+    static constexpr uint32_t NUM_LAYERS = 16;
     static constexpr uint32_t UF_NULL = 0xFFFFFFFF;
-    static constexpr uint32_t MAX_GLOBAL_ROOTS = 32;
+    static constexpr uint32_t MAX_GLOBAL_ROOTS = 64;
     static constexpr uint32_t MAX_TIMESTAMPS = 40;
 
     // Runtime parameters (adjustable via ImGui)
@@ -38,6 +38,8 @@ public:
     float proximityScale = 3.0f;
     float colorThreshold = 0.4f;
     int debugDisplayLayer = -1;
+
+    int debugVisualizationMode = -1;  // -1 = normal peeling, 0-5 = debug modes
 
     float nearPlane = 0.1f;
     float farPlane = 100.0f;
@@ -63,7 +65,7 @@ public:
         float total = 0;
     };
     TimingResults timingResults;
-    bool enableTiming = true;
+    bool enableTiming = false;
 
     struct DebugStats {
         uint32_t fragmentCount = 0;
@@ -72,6 +74,13 @@ public:
         float    usage = 0.0f;  // percentage
     };
     DebugStats debugStats;
+
+    struct DebugGPUInfo {
+        uint32_t minMaxPos = 0;
+        uint32_t numRegisteredRoots = 0;
+        uint32_t pad[2];  // Pad to 16 bytes for alignment
+    };
+    DebugGPUInfo debugGPUInfo;
 
     bool isTimingReady() const { return m_timingReady; }
     void readTimingResults(VkDevice device);
@@ -134,7 +143,7 @@ private:
     void recordRegisterRootsPhase(VkCommandBuffer cmd);
     void recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex);
     void recordCompositePhase(VkCommandBuffer cmd, uint32_t swapchainImageIndex);
-
+    void recordDebugRegionsPhase(VkCommandBuffer cmd, uint32_t swapchainImageIndex);
     void recordMemoryBarrier(VkCommandBuffer cmd,
                              VkPipelineStageFlags srcStage, VkAccessFlags srcAccess,
                              VkPipelineStageFlags dstStage, VkAccessFlags dstAccess);
@@ -265,6 +274,7 @@ private:
     VkPipeline m_resolvePipeline     = VK_NULL_HANDLE;
     VkPipeline m_compositePipeline   = VK_NULL_HANDLE;
     VkPipeline m_registerRootsPipeline = VK_NULL_HANDLE;
+    VkPipeline m_debugRegionsPipeline = VK_NULL_HANDLE;
 
     // ═══════════════════════════════════════════════════════════
     // TIMESTAMPING
@@ -279,4 +289,10 @@ private:
     VkBuffer       m_counterStagingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_counterStagingMemory = VK_NULL_HANDLE;
     void*          m_counterStagingMapped = nullptr;  // Persistently mapped
+
+    VkBuffer       m_debugInfoBuffer        = VK_NULL_HANDLE;
+    VkDeviceMemory m_debugInfoMemory        = VK_NULL_HANDLE;
+    VkBuffer       m_debugInfoStagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_debugInfoStagingMemory = VK_NULL_HANDLE;
+    void*          m_debugInfoStagingMapped = nullptr;
 };

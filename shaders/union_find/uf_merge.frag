@@ -1,25 +1,30 @@
 #version 450
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Union-Find Merge Pass — Soft-Cost Connectivity (4-neighborhood)
+// Union-Find Merge Pass — Rank-Constrained Soft-Cost Connectivity
 //
-// Instead of two disjoint hard tests (tangent-plane OR proximity), all signals
-// are combined into a single scalar cost:
+// Key insight: fragments are only merged across pixel boundaries if they
+// appear at COMPATIBLE DEPTH RANKS in their respective sorted lists.
+// This ensures that depth-coherent surfaces form separate components,
+// even when they belong to the same geometric object (e.g., front and
+// back faces of a concave bowl).
 //
-//   cost = w_plane  * planeResidual  / (planeThreshold  * pixelStep)
-//        + w_normal * (1 - normalDot) * 0.5
-//        + w_depth  * |depthA-depthB| / (proximityScale * pixelStep)
+// For each local fragment at rank k, we only consider neighbor fragments
+// at ranks [k - RANK_WINDOW, k + RANK_WINDOW].
 //
-// Each term is normalized so that "1.0" means "right at the threshold".
-// Two fragments are merged if cost < 1.0.
-//
-// The neighborhood is the symmetric 4-set { N, W, NW, NE } — every adjacent
-// pair is still considered exactly once due to union symmetry.
+// The soft-cost function is unchanged — it still checks geometric
+// compatibility via tangent-plane residual, normal deviation, and depth
+// proximity. The rank constraint is an additional structural filter.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #define NULL_IDX       0xFFFFFFFFu
 #define MAX_FRAGS      32u
 #define MAX_FIND_ITER  64u
+
+// How many ranks above/below to consider when matching across pixels.
+// ±1 handles single-fragment insertions between pixels.
+// ±2 is more robust for complex geometry with variable overdraw.
+#define RANK_WINDOW    2u
 
 layout(set = 0, binding = 0, r32ui) uniform readonly uimage2D headPointerImage;
 
@@ -46,8 +51,8 @@ layout(set = 0, binding = 3, std430) coherent buffer ParentBuffer {
 };
 
 layout(push_constant) uniform PushConstants {
-    float planeThreshold;    // Reference plane-residual scale, e.g. 0.05
-    float proximityScale;    // Reference proximity scale, e.g. 3.0
+    float planeThreshold;    // Reference plane-residual scale
+    float proximityScale;    // Reference proximity scale
     uint  screenWidth;
     uint  screenHeight;
     uint  targetLayer;       // Unused in merge
@@ -58,12 +63,12 @@ layout(push_constant) uniform PushConstants {
     float colorThreshold;
 } pc;
 
-// ─── Soft-cost weights (tune here or promote to push constants) ─────────────
-const float W_PLANE       = 1.0;
-const float W_NORMAL      = 1.0;
-const float W_DEPTH       = 1.0;
-const float W_COLOR       = 0.5; 
-const float COST_THRESHOLD = 1.0;
+// ─── Soft-cost weights ───────────────────────────────────────────────────────
+const float W_PLANE        = 0.25;
+const float W_NORMAL       = 0.25;
+const float W_DEPTH        = 0.25;
+const float W_COLOR        = 0.25;  // Set > 0 to enable color-based filtering
+const float COST_THRESHOLD = 1;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -97,8 +102,6 @@ float computePixelStep(ivec2 pixelA, ivec2 pixelB, float refDepth) {
     return length(refB - refA);
 }
 
-// ─── Color Helpers (unused right now, kept for future re-enable) ────────────
-
 vec3 unpackColorRGB(uint packed) {
     return vec3(
         float(packed & 0xFFu) / 255.0,
@@ -123,12 +126,15 @@ float colorDistance(uint packedA, uint packedB) {
     return length(chromA - chromB);
 }
 
-// ─── Soft-Cost Connectivity ─────────────────────────────────────────────────
-//
-// Returns a normalized cost. cost < COST_THRESHOLD (= 1.0) means "accept".
-// A rejected pair returns 1e30 so it can never win best-neighbor selection.
+// ─── Soft-Cost Connectivity ──────────────────────────────────────────────────
 
 float connectionCost(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
+    // Optional color veto
+    // if (W_COLOR > 0.0) {
+    //     float colDist = colorDistance(nodes[idxA].color, nodes[idxB].color);
+    //     if (colDist > pc.colorThreshold) return 1e30;
+    // }
+
     float depthA = nodes[idxA].depth;
     float depthB = nodes[idxB].depth;
 
@@ -163,11 +169,13 @@ float connectionCost(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
         planeTerm = 0.0;
     }
 
-    // ── Term 4: color dissimilarity ──────────────────────────────────────
-    float colDist = colorDistance(nodes[idxA].color, nodes[idxB].color);
-    float colorTerm = colDist / max(pc.colorThreshold, 1e-6);
+    // ── Term 4: color (optional) ─────────────────────────────────────────
+    float colorTerm = 0.0;
+    if (W_COLOR > 0.0) {
+        float colDist = colorDistance(nodes[idxA].color, nodes[idxB].color);
+        colorTerm = colDist / max(pc.colorThreshold, 1e-6);
+    }
 
-    // ── Combined cost ────────────────────────────────────────────────────
     float cost = W_PLANE  * planeTerm
                + W_NORMAL * normalTerm
                + W_DEPTH  * depthTerm
@@ -224,7 +232,7 @@ void main() {
     );
     if (validNodeCount == 0u) return;
 
-    // ─── Load local fragments ─────────────────────────────────────────────
+    // ─── Load local fragments into array (sorted front-to-back) ───────────
     uint localFragments[MAX_FRAGS];
     uint localCount = 0u;
 
@@ -237,8 +245,6 @@ void main() {
     if (localCount == 0u) return;
 
     // ─── Symmetric 4-neighborhood: N, W, NW, NE ──────────────────────────
-    // Every adjacent pair is visited exactly once because unions are
-    // symmetric — the "other" pixel of the pair would only add duplicates.
     const ivec2 offsets[4] = ivec2[4](
         ivec2( 0, -1),   // N
         ivec2(-1,  0),   // W
@@ -255,32 +261,50 @@ void main() {
             continue;
         }
 
-        // For each local fragment, find the best (lowest-cost) connectable neighbor
-        for (uint local = 0u; local < localCount; ++local) {
+        // ─── Pre-load neighbor fragments into array ──────────────────────
+        uint neighborFragments[MAX_FRAGS];
+        uint neighborCount = 0u;
+
+        uint neighborIndex = imageLoad(headPointerImage, neighborCoordinate).r;
+        while (validNodeIndex(neighborIndex, validNodeCount) && neighborCount < MAX_FRAGS) {
+            neighborFragments[neighborCount++] = neighborIndex;
+            neighborIndex = nodes[neighborIndex].next;
+        }
+
+        if (neighborCount == 0u) continue;
+
+        // ─── Rank-constrained matching ───────────────────────────────────
+        // For each local fragment at rank k, only consider neighbor
+        // fragments at ranks [k - RANK_WINDOW, k + RANK_WINDOW].
+        // This prevents merging across depth discontinuities within
+        // the same pixel column (e.g., bowl front ↔ bowl back).
+
+        for (uint localRank = 0u; localRank < localCount; ++localRank) {
 
             uint  bestNeighbor = NULL_IDX;
-            float bestCost     = COST_THRESHOLD;   // any accepted cost is < this
+            float bestCost     = COST_THRESHOLD;
 
-            uint neighborIndex = imageLoad(headPointerImage, neighborCoordinate).r;
-            uint neighborCount = 0u;
+            // Compute rank search bounds (clamped to valid range)
+            uint rankMin = (localRank > RANK_WINDOW) ? (localRank - RANK_WINDOW) : 0u;
+            uint rankMax = min(localRank + RANK_WINDOW, neighborCount - 1u);
 
-            while (validNodeIndex(neighborIndex, validNodeCount) &&
-                   neighborCount < MAX_FRAGS) {
+            for (uint neighborRank = rankMin; neighborRank <= rankMax; ++neighborRank) {
 
-                float cost = connectionCost(localFragments[local], neighborIndex,
-                                            coordinate, neighborCoordinate);
+                float cost = connectionCost(
+                    localFragments[localRank],
+                    neighborFragments[neighborRank],
+                    coordinate,
+                    neighborCoordinate
+                );
 
                 if (cost < bestCost) {
                     bestCost     = cost;
-                    bestNeighbor = neighborIndex;
+                    bestNeighbor = neighborFragments[neighborRank];
                 }
-
-                neighborIndex = nodes[neighborIndex].next;
-                ++neighborCount;
             }
 
             if (bestNeighbor != NULL_IDX) {
-                unionSets(localFragments[local], bestNeighbor);
+                unionSets(localFragments[localRank], bestNeighbor);
             }
         }
     }

@@ -2,7 +2,7 @@
 
 #define NULL_IDX         0xFFFFFFFF
 #define MAX_FRAGS        32
-#define MAX_GLOBAL_ROOTS 32
+#define MAX_GLOBAL_ROOTS 64
 
 layout(set = 0, binding = 0, r32ui) uniform uimage2D headPointerImage;
 

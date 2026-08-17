@@ -43,10 +43,10 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
         return false;
 
     // Scene
-    // std::string scenePath = "../assets/circles16.obj";
+    std::string scenePath = "../assets/circles16.obj";
     // std::string scenePath = "../assets/simple_scene.obj";
     // std::string scenePath = "assets/sponza/sponza.obj";
-    std::string scenePath = "assets/simple_room/simple_room.obj";
+    // std::string scenePath = "assets/simple_room/simple_room.obj";
     if (!m_scene.loadFromOBJ(scenePath))
     {
         std::cerr << "Failed to load scene: " << scenePath << std::endl;
@@ -202,6 +202,41 @@ void Application::drawFrame()
     ImGui::Separator();
     ImGui::Checkbox("Bypass Union-Find (show front only)", &m_renderer.bypassUnionFind);
 
+    // In your ImGui panel:
+    ImGui::Separator();
+    ImGui::Text("Debug Visualization");
+    
+    const char* debugModes[] = {
+        "Normal Rendering",     // -1
+        "Region ID (root)",     //  0
+        "Object ID",            //  1
+        "Depth",                //  2
+        "View Normals",         //  3
+        "Fragment Color",       //  4
+        "Fragment Count Heat",   //  5
+        "Peel Layer",           //  6
+        "Region Rank Span"     //  7
+    };
+    
+    // Offset by 1 so index 0 = "Normal Rendering" = debugVisualizationMode -1
+    int current = m_renderer.debugVisualizationMode + 1;
+    if (ImGui::Combo("Vis Mode", &current, debugModes, IM_ARRAYSIZE(debugModes))) {
+        m_renderer.debugVisualizationMode = current - 1;
+    }
+
+    ImGui::Separator();
+    ImGui::Text("GPU Debug Info (Peel Layer 0):");
+    ImGui::Text("  Min maxPosition:   %u", m_renderer.debugGPUInfo.minMaxPos);
+    ImGui::Text("  Registered roots:  %u / %u", m_renderer.debugGPUInfo.numRegisteredRoots, UFRenderer::MAX_GLOBAL_ROOTS);
+    
+    if (m_renderer.debugGPUInfo.minMaxPos > 0) {
+        ImGui::TextColored(ImVec4(1, 1, 0, 1), 
+            "  Warning: No root has maxPos=0 (min=%u)", m_renderer.debugGPUInfo.minMaxPos);
+    }
+    if (m_renderer.debugGPUInfo.numRegisteredRoots >= UFRenderer::MAX_GLOBAL_ROOTS) {
+        ImGui::TextColored(ImVec4(1, 0, 0, 1), 
+            "  ERROR: Root table full! Increase MAX_GLOBAL_ROOTS");
+    }
 
     // ─── Debug Info ───
     if (ImGui::CollapsingHeader("Debug Info")) {
@@ -474,10 +509,10 @@ void Application::initCamera() {
     glm::vec3 center = m_scene.getCenter();
     float radius = m_scene.getRadius();
 
-    // m_camera.target = center;
-    m_camera.target = glm::vec3(-7.493f,5.453f,-3.652f);
-    // m_camera.distance = radius * 0.1f;
-    m_camera.distance = 2.74f;
+    m_camera.target = center;
+    // m_camera.target = glm::vec3(-7.493f,5.453f,-3.652f);
+    m_camera.distance = radius * 0.1f;
+    // m_camera.distance = 2.74f;
     m_camera.yaw = 0.0f;
     m_camera.pitch = 0.3f;
     m_camera.updateFromOrbit();

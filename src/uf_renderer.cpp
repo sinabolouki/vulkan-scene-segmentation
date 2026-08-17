@@ -74,6 +74,8 @@ void UFRenderer::destroy(VkDevice device)
     vkDestroyPipeline(device, m_registerRootsPipeline, nullptr);
     vkDestroyPipeline(device, m_resolvePipeline, nullptr);
     vkDestroyPipeline(device, m_compositePipeline, nullptr);
+    vkDestroyPipeline(device, m_debugRegionsPipeline, nullptr);
+
 
     vkDestroyPipelineLayout(device, m_collectPipelineLayout, nullptr);
     vkDestroyPipelineLayout(device, m_fullscreenPipelineLayout, nullptr);
@@ -202,6 +204,40 @@ bool UFRenderer::createDataStructures(VulkanContext &context)
 
         vkBindBufferMemory(context.device, m_counterStagingBuffer, m_counterStagingMemory, 0);
         vkMapMemory(context.device, m_counterStagingMemory, 0, sizeof(uint32_t), 0, &m_counterStagingMapped);
+    }
+
+    // Debug info buffer (GPU-side, written by shaders)
+    {
+        VkDeviceSize debugSize = sizeof(uint32_t) * 4;  // minMaxPos, numRoots, pad, pad
+
+        // GPU buffer (written via atomics in shaders)
+        if (!createBuffer(context, debugSize,
+                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          m_debugInfoBuffer, m_debugInfoMemory))
+            return false;
+
+        // Staging buffer (CPU-readable)
+        VkBufferCreateInfo bufInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bufInfo.size = debugSize;
+        bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateBuffer(context.device, &bufInfo, nullptr, &m_debugInfoStagingBuffer) != VK_SUCCESS)
+            return false;
+
+        VkMemoryRequirements memReq;
+        vkGetBufferMemoryRequirements(context.device, m_debugInfoStagingBuffer, &memReq);
+
+        VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocInfo.allocationSize = memReq.size;
+        allocInfo.memoryTypeIndex = findMemoryType(context.physical_device, memReq.memoryTypeBits,
+                                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        if (vkAllocateMemory(context.device, &allocInfo, nullptr, &m_debugInfoStagingMemory) != VK_SUCCESS)
+            return false;
+
+        vkBindBufferMemory(context.device, m_debugInfoStagingBuffer, m_debugInfoStagingMemory, 0);
+        vkMapMemory(context.device, m_debugInfoStagingMemory, 0, debugSize, 0, &m_debugInfoStagingMapped);
     }
 
     return true;
@@ -388,14 +424,15 @@ bool UFRenderer::createSampler(VkDevice device)
 
 bool UFRenderer::createDescriptorSetLayouts(VkDevice device)
 {
-    // PPLL set: 5 bindings
+    // PPLL set: 6 bindings
     {
-        std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
+        std::array<VkDescriptorSetLayoutBinding, 6> bindings{};
         bindings[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
         bindings[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
         bindings[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
         bindings[3] = {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
         bindings[4] = {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        bindings[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
 
         VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         info.bindingCount = (uint32_t)bindings.size();
@@ -431,7 +468,7 @@ bool UFRenderer::createDescriptorPool(VkDevice device)
 {
     std::array<VkDescriptorPoolSize, 3> sizes{};
     sizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1};
-    sizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4}; // nodes + counter + parent + rootTable
+    sizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5}; // nodes + counter + parent + rootTable + debugInfo
     sizes[2] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, NUM_LAYERS};
 
     VkDescriptorPoolCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -460,8 +497,9 @@ bool UFRenderer::createDescriptorSets(VkDevice device)
         VkDescriptorBufferInfo counterInfo{m_atomicCounterBuffer, 0, sizeof(uint32_t)};
         VkDescriptorBufferInfo parentInfo{m_parentBuffer, 0, VK_WHOLE_SIZE};
         VkDescriptorBufferInfo rootTableInfo{m_rootTableBuffer, 0, VK_WHOLE_SIZE};
+        VkDescriptorBufferInfo debugInfoBufInfo{m_debugInfoBuffer, 0, VK_WHOLE_SIZE};
 
-        std::array<VkWriteDescriptorSet, 5> writes{};
+        std::array<VkWriteDescriptorSet, 6> writes{};
 
         writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         writes[0].dstSet = m_ppllDescSet;
@@ -497,6 +535,13 @@ bool UFRenderer::createDescriptorSets(VkDevice device)
         writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         writes[4].descriptorCount = 1;
         writes[4].pBufferInfo = &rootTableInfo;
+
+        writes[5] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[5].dstSet = m_ppllDescSet;
+        writes[5].dstBinding = 5;
+        writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[5].descriptorCount = 1;
+        writes[5].pBufferInfo = &debugInfoBufInfo;
 
         vkUpdateDescriptorSets(device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
     }
@@ -752,6 +797,22 @@ bool UFRenderer::createPipelines(VkDevice device)
     if (!m_compositePipeline)
         return false;
 
+    // ─── Debug Regions ───
+    b.clear();
+    m_debugRegionsPipeline = b
+                                .setVertexShader(fullscreenVert)
+                                .setFragmentShader(ShaderUtils::createShaderModule(device, sd + "/uf_debug_regions.frag.spv"))
+                                .setNoVertexInput()
+                                .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+                                .setCullMode(VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE)
+                                .disableDepthTest()
+                                .disableBlending()
+                                .setPipelineLayout(m_fullscreenPipelineLayout)
+                                .setRenderPass(m_compositeRenderPass, 0)
+                                .build(device);
+    if (!m_debugRegionsPipeline)
+    return false;
+
     // Cleanup shader modules
     vkDestroyShaderModule(device, collectVert, nullptr);
     vkDestroyShaderModule(device, collectFrag, nullptr);
@@ -961,6 +1022,27 @@ void UFRenderer::destroySizeDependent(VkDevice device)
         m_rootTableBufferMemory = VK_NULL_HANDLE;
     }
 
+    if (m_debugInfoBuffer) {
+        vkDestroyBuffer(device, m_debugInfoBuffer, nullptr);
+        m_debugInfoBuffer = VK_NULL_HANDLE;
+    }
+    if (m_debugInfoMemory) {
+        vkFreeMemory(device, m_debugInfoMemory, nullptr);
+        m_debugInfoMemory = VK_NULL_HANDLE;
+    }
+    if (m_debugInfoStagingBuffer) {
+        if (m_debugInfoStagingMapped) {
+            vkUnmapMemory(device, m_debugInfoStagingMemory);
+            m_debugInfoStagingMapped = nullptr;
+        }
+        vkDestroyBuffer(device, m_debugInfoStagingBuffer, nullptr);
+        m_debugInfoStagingBuffer = VK_NULL_HANDLE;
+    }
+    if (m_debugInfoStagingMemory) {
+        vkFreeMemory(device, m_debugInfoStagingMemory, nullptr);
+        m_debugInfoStagingMemory = VK_NULL_HANDLE;
+    }
+
     for (auto &layer : m_layerImages)
     {
         if (layer.framebuffer)
@@ -1007,22 +1089,31 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
                                 VkBuffer indexBuffer,
                                 const std::vector<SceneObject> &objects,
                                 const glm::mat4 &viewProj,
-                                const glm::mat4 &view,       // ← NEW
-                                const glm::mat4 &projection, // ← NEW (needed for projX, projY)
+                                const glm::mat4 &view,
+                                const glm::mat4 &projection,
                                 uint32_t swapchainImageIndex)
 {
-
     m_projX = projection[0][0];
     m_projY = projection[1][1];
 
-    readTimingResults(context.device);
+    bool useDebugVis = (debugVisualizationMode >= 0);
+
+    // ─── Read back previous frame's results ──────────────────────────────
+    if (enableTiming && !useDebugVis)
+    {
+        readTimingResults(context.device);
+    }
+
+    // Read back atomic counter (fragment count) from previous frame
     if (m_counterStagingMapped)
     {
         uint32_t fragCount = *reinterpret_cast<uint32_t *>(m_counterStagingMapped);
         debugStats.fragmentCount = fragCount;
         debugStats.nodeCapacity = m_nodeCapacity;
         debugStats.overflowed = (fragCount >= m_nodeCapacity);
-        debugStats.usage = (m_nodeCapacity > 0) ? (float(fragCount) / float(m_nodeCapacity)) * 100.0f : 0.0f;
+        debugStats.usage = (m_nodeCapacity > 0)
+            ? (float(fragCount) / float(m_nodeCapacity)) * 100.0f
+            : 0.0f;
 
         if (debugStats.overflowed)
         {
@@ -1031,71 +1122,137 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
                       << debugStats.usage << "%)" << std::endl;
         }
     }
+
+    // Read back debug info (minMaxPos, numRoots) from previous frame
+    if (m_debugInfoStagingMapped)
+    {
+        uint32_t *data = reinterpret_cast<uint32_t *>(m_debugInfoStagingMapped);
+        debugGPUInfo.minMaxPos = data[0];
+        debugGPUInfo.numRegisteredRoots = data[1];
+    }
+
+    // ─── Reset timestamps ────────────────────────────────────────────────
     m_timestampCount = 0;
 
-    if (enableTiming)
+    if (enableTiming && !useDebugVis)
     {
         vkCmdResetQueryPool(cmd, m_timestampQueryPool, 0, MAX_TIMESTAMPS);
     }
 
     auto stamp = [&]()
     {
-        if (enableTiming && m_timestampCount < MAX_TIMESTAMPS)
+        if (enableTiming && !useDebugVis && m_timestampCount < MAX_TIMESTAMPS)
         {
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                                 m_timestampQueryPool, m_timestampCount++);
         }
     };
 
-    // ─── One-time setup passes ───
+    // ═════════════════════════════════════════════════════════════════════
+    // PHASE 1: CLEAR
+    // ═════════════════════════════════════════════════════════════════════
     stamp(); // [0] frame start
 
     recordClearPhase(cmd);
     stamp(); // [1] after clear
 
+    // ═════════════════════════════════════════════════════════════════════
+    // PHASE 2: COLLECT
+    // ═════════════════════════════════════════════════════════════════════
     recordCollectPhase(cmd, vertexBuffer, indexBuffer, objects, viewProj, view);
     recordMemoryBarrier(cmd,
                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT);
 
-    // Copy atomic counter to staging buffer for CPU readback next frame
-    VkBufferCopy copyRegion{};
-    copyRegion.size = sizeof(uint32_t);
-    vkCmdCopyBuffer(cmd, m_atomicCounterBuffer, m_counterStagingBuffer, 1, &copyRegion);
+    // Copy atomic counter to staging for CPU readback next frame
+    VkBufferCopy counterCopy{};
+    counterCopy.size = sizeof(uint32_t);
+    vkCmdCopyBuffer(cmd, m_atomicCounterBuffer, m_counterStagingBuffer, 1, &counterCopy);
+
     stamp(); // [2] after collect
 
+    // ═════════════════════════════════════════════════════════════════════
+    // PHASE 3: SORT
+    // ═════════════════════════════════════════════════════════════════════
     recordSortPhase(cmd);
     recordMemoryBarrier(cmd,
                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     stamp(); // [3] after sort
 
+    // ═════════════════════════════════════════════════════════════════════
+    // PHASE 4: INIT PARENTS
+    // ═════════════════════════════════════════════════════════════════════
+    recordInitParentsPhase(cmd);
+    recordMemoryBarrier(cmd,
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    stamp(); // [4] after init parents
+
+    // ═════════════════════════════════════════════════════════════════════
+    // PHASE 5 & 6: MERGE + COMPRESS (iterative, skipped if bypass)
+    // ═════════════════════════════════════════════════════════════════════
+    int mergeIterations = 2;
     if (!bypassUnionFind)
     {
-        recordInitParentsPhase(cmd);
+        for (uint32_t iter = 0; iter < mergeIterations; iter++)
+        {
+            recordMergePhase(cmd);
+            recordMemoryBarrier(cmd,
+                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+            recordCompressPhase(cmd);
+            recordMemoryBarrier(cmd,
+                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        }
+    }
+    stamp(); // [5] after merge (or placeholder if bypassed)
+    stamp(); // [6] after compress (or placeholder if bypassed)
+
+    // ═════════════════════════════════════════════════════════════════════
+    // OUTPUT: Either debug visualization or peel+composite
+    // ═════════════════════════════════════════════════════════════════════
+    if (useDebugVis)
+    {
+        // ─── Debug mode: run register_roots once, then render debug ──────
+
+        // Clear root table
+        vkCmdFillBuffer(cmd, m_rootTableBuffer, 0,
+                        MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0xFFFFFFFF);
+        vkCmdFillBuffer(cmd, m_rootTableBuffer, MAX_GLOBAL_ROOTS * sizeof(uint32_t),
+                        MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0);
+        recordMemoryBarrier(cmd,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+        // Register roots (fills root table with maxPositions)
+        recordRegisterRootsPhase(cmd);
         recordMemoryBarrier(cmd,
                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-        stamp(); // [4] after init parents
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 
-        recordMergePhase(cmd);
+        // Render debug directly to swapchain
+        recordDebugRegionsPhase(cmd, swapchainImageIndex);
+    }
+    else
+    {
+        // ─── Normal path: peel loop + composite ──────────────────────────
+
+        // Clear debug info buffer before peeling
+        vkCmdFillBuffer(cmd, m_debugInfoBuffer, 0, sizeof(uint32_t), 0xFFFFFFFF);  // debugMinMaxPos
+        vkCmdFillBuffer(cmd, m_debugInfoBuffer, sizeof(uint32_t), sizeof(uint32_t), 0);  // debugNumRoots
+        vkCmdFillBuffer(cmd, m_debugInfoBuffer, 2 * sizeof(uint32_t), 2 * sizeof(uint32_t), 0);  // padding
         recordMemoryBarrier(cmd,
-                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-        stamp(); // [5] after merge
 
-        recordCompressPhase(cmd);
-        recordMemoryBarrier(cmd,
-                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-        stamp(); // [6] after compress
-
-        // ─── Peel loop ───
-        // Each peel gets 3 timestamps: after clear_table, after register, after resolve
+        // ─── Peel loop ───────────────────────────────────────────────────
         for (uint32_t peel = 0; peel < NUM_LAYERS; peel++)
         {
-            // Clear root table
+            // Clear root table for this peel iteration
             vkCmdFillBuffer(cmd, m_rootTableBuffer, 0,
                             MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0xFFFFFFFF);
             vkCmdFillBuffer(cmd, m_rootTableBuffer, MAX_GLOBAL_ROOTS * sizeof(uint32_t),
@@ -1103,93 +1260,45 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
             recordMemoryBarrier(cmd,
                                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-            stamp(); // [7 + peel*3] after clear table
+            stamp();
 
             // Register roots
             recordRegisterRootsPhase(cmd);
             recordMemoryBarrier(cmd,
                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-            stamp(); // [8 + peel*3] after register
+            stamp();
 
-            // Resolve + advance head
+            // Resolve + advance head pointer
             recordResolvePhase(cmd, peel);
             recordMemoryBarrier(cmd,
                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-            stamp(); // [9 + peel*3] after resolve
+            stamp();
         }
-    }
-    else
-    {
-        recordInitParentsPhase(cmd);
+
+        // ─── Copy debug info to staging for CPU readback ─────────────────
         recordMemoryBarrier(cmd,
                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-        stamp(); // [4] after init parents
+                            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
 
-        if (!bypassUnionFind)
-        {
-            recordMergePhase(cmd);
-            recordMemoryBarrier(cmd,
-                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-            stamp(); // [5] after merge
+        VkBufferCopy debugCopy{};
+        debugCopy.size = 4 * sizeof(uint32_t);
+        vkCmdCopyBuffer(cmd, m_debugInfoBuffer, m_debugInfoStagingBuffer, 1, &debugCopy);
 
-            recordCompressPhase(cmd);
-            recordMemoryBarrier(cmd,
-                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-            stamp(); // [6] after compress
-        }
-        else
-        {
-            stamp(); // [5] placeholder
-            stamp(); // [6] placeholder
-        }
+        // ─── Composite ───────────────────────────────────────────────────
+        recordMemoryBarrier(cmd,
+                            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 
-        // ─── Peel loop (ALWAYS runs — all 8 layers need render passes) ───
-        for (uint32_t peel = 0; peel < NUM_LAYERS; peel++)
-        {
-            vkCmdFillBuffer(cmd, m_rootTableBuffer, 0,
-                            MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0xFFFFFFFF);
-            vkCmdFillBuffer(cmd, m_rootTableBuffer, MAX_GLOBAL_ROOTS * sizeof(uint32_t),
-                            MAX_GLOBAL_ROOTS * sizeof(uint32_t), 0);
-            recordMemoryBarrier(cmd,
-                                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-            stamp();
-
-            recordRegisterRootsPhase(cmd);
-            recordMemoryBarrier(cmd,
-                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-            stamp();
-
-            recordResolvePhase(cmd, peel);
-            recordMemoryBarrier(cmd,
-                                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-            stamp();
-        }
+        recordCompositePhase(cmd, swapchainImageIndex);
+        stamp();
     }
 
-    // ─── Composite ───
-    // Timestamp index = 7 + NUM_LAYERS*3 = 19
-    recordMemoryBarrier(cmd,
-                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-
-    recordCompositePhase(cmd, swapchainImageIndex);
-    stamp(); // [7 + NUM_LAYERS*3] after composite
-
-    m_timingReady = true;
+    m_timingReady = !useDebugVis;
 }
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // PHASE 1: CLEAR
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1251,14 +1360,14 @@ void UFRenderer::recordCollectPhase(VkCommandBuffer cmd,
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_noAttachmentRenderPass;
     rp.framebuffer = m_noAttachmentFramebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_collectPipeline);
 
     VkViewport vp{0, (float)m_height, (float)m_width, -(float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0, 0}, {m_width, m_height}};
+    VkRect2D sc = { {0, 0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     // Bind set 0: PPLL data
@@ -1306,14 +1415,14 @@ void UFRenderer::recordSortPhase(VkCommandBuffer cmd)
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_noAttachmentRenderPass;
     rp.framebuffer = m_noAttachmentFramebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_sortPipeline);
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0, 0}, {m_width, m_height}};
+    VkRect2D sc = { {0, 0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1341,14 +1450,14 @@ void UFRenderer::recordInitParentsPhase(VkCommandBuffer cmd)
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_noAttachmentRenderPass;
     rp.framebuffer = m_noAttachmentFramebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_initParentsPipeline);
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0, 0}, {m_width, m_height}};
+    VkRect2D sc = { {0, 0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1376,14 +1485,14 @@ void UFRenderer::recordMergePhase(VkCommandBuffer cmd)
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_noAttachmentRenderPass;
     rp.framebuffer = m_noAttachmentFramebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_mergePipeline);
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0, 0}, {m_width, m_height}};
+    VkRect2D sc = { {0, 0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1416,14 +1525,14 @@ void UFRenderer::recordCompressPhase(VkCommandBuffer cmd)
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_noAttachmentRenderPass;
     rp.framebuffer = m_noAttachmentFramebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_compressPipeline);
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0, 0}, {m_width, m_height}};
+    VkRect2D sc = { {0, 0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1447,14 +1556,14 @@ void UFRenderer::recordRegisterRootsPhase(VkCommandBuffer cmd)
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_noAttachmentRenderPass;
     rp.framebuffer = m_noAttachmentFramebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_registerRootsPipeline);
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0, 0}, {m_width, m_height}};
+    VkRect2D sc = { {0, 0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1480,12 +1589,12 @@ void UFRenderer::recordRegisterRootsPhase(VkCommandBuffer cmd)
 void UFRenderer::recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex)
 {
     VkClearValue clear{};
-    clear.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    clear.color = { {0.0f, 0.0f, 0.0f, 0.0f} };
 
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_layerRenderPass;
     rp.framebuffer = m_layerImages[layerIndex].framebuffer;
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     rp.clearValueCount = 1;
     rp.pClearValues = &clear;
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
@@ -1494,7 +1603,7 @@ void UFRenderer::recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex)
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0, 0}, {m_width, m_height}};
+    VkRect2D sc = { {0, 0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1538,12 +1647,12 @@ void UFRenderer::recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex)
 void UFRenderer::recordCompositePhase(VkCommandBuffer cmd, uint32_t swapchainImageIndex)
 {
     VkClearValue clear{};
-    clear.color = {{0.02f, 0.02f, 0.08f, 1.0f}};
+    clear.color = { {0.02f, 0.02f, 0.08f, 1.0f} };
 
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = m_compositeRenderPass;
     rp.framebuffer = m_compositeFramebuffers[swapchainImageIndex];
-    rp.renderArea = {{0, 0}, {m_width, m_height}};
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
     rp.clearValueCount = 1;
     rp.pClearValues = &clear;
     vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
@@ -1552,7 +1661,7 @@ void UFRenderer::recordCompositePhase(VkCommandBuffer cmd, uint32_t swapchainIma
 
     VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
     vkCmdSetViewport(cmd, 0, 1, &vp);
-    VkRect2D sc = {{0, 0}, {m_width, m_height}};
+    VkRect2D sc = { {0, 0}, {m_width, m_height} };
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1562,6 +1671,47 @@ void UFRenderer::recordCompositePhase(VkCommandBuffer cmd, uint32_t swapchainIma
     pc.numLayers = NUM_LAYERS;
     pc.displayLayer = debugDisplayLayer;
     vkCmdPushConstants(cmd, m_compositePipelineLayout,
+                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+}
+
+void UFRenderer::recordDebugRegionsPhase(VkCommandBuffer cmd, uint32_t swapchainImageIndex)
+{
+    VkClearValue clear{};
+    clear.color = { {0.02f, 0.02f, 0.08f, 1.0f} };
+
+    VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rp.renderPass = m_compositeRenderPass;
+    rp.framebuffer = m_compositeFramebuffers[swapchainImageIndex];
+    rp.renderArea = { {0, 0}, {m_width, m_height} };
+    rp.clearValueCount = 1;
+    rp.pClearValues = &clear;
+    vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_debugRegionsPipeline);
+
+    VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    VkRect2D sc = { {0, 0}, {m_width, m_height} };
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
+
+    UFFullscreenPushConstants pc{};
+    pc.planeThreshold = planeThreshold;
+    pc.proximityScale = proximityScale;
+    pc.screenWidth = m_width;
+    pc.screenHeight = m_height;
+    pc.targetLayer = static_cast<uint32_t>(debugVisualizationMode);  // visualization mode
+    pc.nearPlane = nearPlane;
+    pc.farPlane = farPlane;
+    pc.projX = m_projX;
+    pc.projY = m_projY;
+    pc.colorThreshold = colorThreshold;
+    vkCmdPushConstants(cmd, m_fullscreenPipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
 
     vkCmdDraw(cmd, 3, 1, 0, 0);
