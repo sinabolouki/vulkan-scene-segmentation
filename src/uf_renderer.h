@@ -39,7 +39,7 @@ public:
     float colorThreshold = 0.4f;
     int debugDisplayLayer = -1;
 
-    int debugVisualizationMode = -1;  // -1 = normal peeling, 0-5 = debug modes
+    int debugVisualizationMode = 4;  // -1 = normal peeling, 0-7 = debug visualization modes
 
     float nearPlane = 0.1f;
     float farPlane = 100.0f;

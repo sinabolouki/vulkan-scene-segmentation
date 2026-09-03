@@ -43,10 +43,11 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
         return false;
 
     // Scene
-    std::string scenePath = "../assets/circles16.obj";
+    // std::string scenePath = "../assets/circles16.obj";
     // std::string scenePath = "../assets/simple_scene.obj";
     // std::string scenePath = "assets/sponza/sponza.obj";
-    // std::string scenePath = "assets/simple_room/simple_room.obj";
+    std::string scenePath = "assets/simple_room/simple_room.obj";
+    // std::string scenePath = "assets/office/model.obj";
     if (!m_scene.loadFromOBJ(scenePath))
     {
         std::cerr << "Failed to load scene: " << scenePath << std::endl;
@@ -512,7 +513,7 @@ void Application::initCamera() {
     m_camera.target = center;
     // m_camera.target = glm::vec3(-7.493f,5.453f,-3.652f);
     m_camera.distance = radius * 0.1f;
-    // m_camera.distance = 2.74f;
+    m_camera.distance = 2.74f;
     m_camera.yaw = 0.0f;
     m_camera.pitch = 0.3f;
     m_camera.updateFromOrbit();

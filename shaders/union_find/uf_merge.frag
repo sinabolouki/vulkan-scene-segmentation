@@ -68,7 +68,7 @@ const float W_PLANE        = 0.25;
 const float W_NORMAL       = 0.25;
 const float W_DEPTH        = 0.25;
 const float W_COLOR        = 0.25;  // Set > 0 to enable color-based filtering
-const float COST_THRESHOLD = 1;
+const float COST_THRESHOLD = 1.0;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

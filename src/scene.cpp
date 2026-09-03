@@ -186,6 +186,7 @@ bool Scene::loadFromOBJ(const std::string &filepath)
                 // vertex.color = glm::vec3(1.0f);
                 vertex.color = glm::vec3(attrib.colors[3 * idx.vertex_index + 0],attrib.colors[3 * idx.vertex_index + 1],
                                          attrib.colors[3 * idx.vertex_index + 2]);
+                // vertex.color = faceDiffuse;  // Override with material diffuse color
 
                 // UV
                 if (idx.texcoord_index >= 0 && !attrib.texcoords.empty())
