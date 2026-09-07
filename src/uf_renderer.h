@@ -31,7 +31,7 @@ public:
     static constexpr uint32_t NUM_LAYERS = 16;
     static constexpr uint32_t UF_NULL = 0xFFFFFFFF;
     static constexpr uint32_t MAX_GLOBAL_ROOTS = 64;
-    static constexpr uint32_t MAX_TIMESTAMPS = 40;
+    static constexpr uint32_t MAX_TIMESTAMPS = 64;
 
     // Runtime parameters (adjustable via ImGui)
     float planeThreshold = 1.5f;
@@ -39,7 +39,7 @@ public:
     float colorThreshold = 0.4f;
     int debugDisplayLayer = -1;
 
-    int debugVisualizationMode = 4;  // -1 = normal peeling, 0-7 = debug visualization modes
+    int debugVisualizationMode = -1;  // -1 = normal peeling, 0-7 = debug visualization modes
 
     float nearPlane = 0.1f;
     float farPlane = 100.0f;
@@ -65,7 +65,7 @@ public:
         float total = 0;
     };
     TimingResults timingResults;
-    bool enableTiming = false;
+    bool enableTiming = true;
 
     struct DebugStats {
         uint32_t fragmentCount = 0;
@@ -141,6 +141,7 @@ private:
     void recordMergePhase(VkCommandBuffer cmd);
     void recordCompressPhase(VkCommandBuffer cmd);
     void recordRegisterRootsPhase(VkCommandBuffer cmd);
+    void recordFindMinPhase(VkCommandBuffer cmd);
     void recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex);
     void recordCompositePhase(VkCommandBuffer cmd, uint32_t swapchainImageIndex);
     void recordDebugRegionsPhase(VkCommandBuffer cmd, uint32_t swapchainImageIndex);
@@ -203,8 +204,18 @@ private:
     VkBuffer       m_parentBuffer       = VK_NULL_HANDLE;
     VkDeviceMemory m_parentBufferMemory = VK_NULL_HANDLE;
 
-    VkBuffer       m_rootTableBuffer       = VK_NULL_HANDLE;
-    VkDeviceMemory m_rootTableBufferMemory = VK_NULL_HANDLE;
+    VkBuffer       m_rootMaxPosBuffer       = VK_NULL_HANDLE;
+    VkDeviceMemory m_rootMaxPosMemory       = VK_NULL_HANDLE;
+
+    VkBuffer       m_globalMinBuffer        = VK_NULL_HANDLE;
+    VkDeviceMemory m_globalMinMemory        = VK_NULL_HANDLE;
+
+    VkBuffer       m_globalMinStagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_globalMinStagingMemory = VK_NULL_HANDLE;
+    void*          m_globalMinStagingMapped = nullptr;
+
+    // Pipeline for the find-min pass
+    VkPipeline     m_findMinPipeline        = VK_NULL_HANDLE;
 
     // ═══════════════════════════════════════════════════════════
     // LAYER COLOR IMAGES

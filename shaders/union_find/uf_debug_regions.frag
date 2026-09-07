@@ -9,12 +9,11 @@
 // Mode 3: View-space normals (RGB)
 // Mode 4: Original fragment color
 // Mode 5: Per-pixel fragment count heatmap
-// Mode 6: Peel layer — maxPosition of front root in root table
+// Mode 6: Peel layer — rootMaxPos[root] relative to globalMin
 // Mode 7: Region rank span (same-root fragment count at this pixel)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#define NULL_IDX         0xFFFFFFFFu
-#define MAX_GLOBAL_ROOTS 64u
+#define NULL_IDX 0xFFFFFFFFu
 
 layout(set = 0, binding = 0, r32ui) uniform uimage2D headPointerImage;
 
@@ -40,8 +39,12 @@ layout(set = 0, binding = 3, std430) readonly buffer ParentBuffer {
     uint parent[];
 };
 
-layout(set = 0, binding = 4, std430) readonly buffer RootTable {
-    uint rootTable[];  // [0..31] = rootIDs, [32..63] = maxPositions
+layout(set = 0, binding = 4, std430) readonly buffer RootMaxPosBuffer {
+    uint rootMaxPos[];
+};
+
+layout(set = 0, binding = 5, std430) readonly buffer GlobalMinBuffer {
+    uint globalMinMaxPos;
 };
 
 layout(push_constant) uniform PushConstants {
@@ -123,22 +126,6 @@ vec4 unpackColor(uint packed) {
     );
 }
 
-// ─── Root table lookup ───────────────────────────────────────────────────────
-// Returns: slot index in [0..31] if found, or NULL_IDX if not registered.
-// Also outputs maxPosition for that root.
-
-uint findRootSlot(uint root, out uint maxPosition) {
-    for (uint i = 0u; i < MAX_GLOBAL_ROOTS; i++) {
-        if (rootTable[i] == NULL_IDX) break;   // End of table
-        if (rootTable[i] == root) {
-            maxPosition = rootTable[MAX_GLOBAL_ROOTS + i];
-            return i;
-        }
-    }
-    maxPosition = NULL_IDX;
-    return NULL_IDX;
-}
-
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 void main() {
@@ -157,6 +144,7 @@ void main() {
         return;
     }
 
+    uint validCount = min(counter, uint(rootMaxPos.length()));
     uint root = parent[idx];
 
     // ─── Visualization modes ─────────────────────────────────────────────
@@ -202,24 +190,36 @@ void main() {
     }
     else if (targetLayer == 6u) {
         // Mode 6: Peel layer visualization
-        // Shows which peel iteration would output this pixel's front root
+        // Shows which peel iteration would output this pixel's front root.
+        //
+        // rootMaxPos[root] = the worst-case (deepest) position of this root
+        // globalMinMaxPos  = the smallest maxPos among all visible roots
+        // layerIdx         = how many peel iterations before this root gets output
+        //
+        // Layer 0 (red)  = peels first
+        // Layer 1 (green) = peels second
+        // White = root out of bounds
 
-        uint minMaxPos = NULL_IDX;
-        for (uint i = 0u; i < MAX_GLOBAL_ROOTS; i++) {
-            if (rootTable[i] == NULL_IDX) break;
-            uint pos = rootTable[MAX_GLOBAL_ROOTS + i];
-            minMaxPos = min(minMaxPos, pos);
+        if (root >= validCount) {
+            outColor = vec4(1.0, 1.0, 1.0, 1.0);  // White = invalid root
+            return;
         }
 
-        uint maxPos;
-        uint slot = findRootSlot(root, maxPos);
+        uint maxPos = rootMaxPos[root];
+        uint minPos = globalMinMaxPos;
 
-        if (slot == NULL_IDX) {
-            // Root not in table — overflow
-            outColor = vec4(1.0, 1.0, 1.0, 1.0);  // White = overflow
+        if (maxPos == 0u && minPos == 0u) {
+            // Unwritten root (rootMaxPos was cleared to 0 and never atomicMax'd)
+            // This means this root has no registered fragments — shouldn't happen
+            // but handle gracefully
+            outColor = vec4(0.3, 0.3, 0.3, 1.0);  // Gray = unregistered
+        }
+        else if (minPos == NULL_IDX) {
+            // No roots registered at all
+            outColor = vec4(0.5, 0.0, 0.5, 1.0);  // Dark magenta = empty scene
         }
         else {
-            uint layerIdx = maxPos - minMaxPos;
+            uint layerIdx = maxPos - minPos;
             layerIdx = min(layerIdx, 31u);
             outColor = vec4(LAYER_COLORS[layerIdx], 1.0);
         }

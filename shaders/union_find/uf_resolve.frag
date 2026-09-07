@@ -1,8 +1,16 @@
 #version 450
 
-#define NULL_IDX         0xFFFFFFFF
-#define MAX_FRAGS        32
-#define MAX_GLOBAL_ROOTS 64
+// ═══════════════════════════════════════════════════════════════════════════════
+// Resolve Pass — Uses per-root maxPosition buffer + global min
+//
+// For each pixel:
+//   1. Read globalMinMaxPos (computed by find_min pass)
+//   2. Check if front fragment's root has rootMaxPos[root] == globalMin
+//   3. If yes: output color, advance head
+//   4. If no: discard (leave for future peel)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#define NULL_IDX 0xFFFFFFFF
 
 layout(set = 0, binding = 0, r32ui) uniform uimage2D headPointerImage;
 
@@ -28,11 +36,15 @@ layout(set = 0, binding = 3, std430) buffer ParentBuffer {
     uint parent[];
 };
 
-layout(set = 0, binding = 4, std430) buffer RootTable {
-    uint rootTable[];
+layout(set = 0, binding = 4, std430) readonly buffer RootMaxPosBuffer {
+    uint rootMaxPos[];
 };
 
-layout(set = 0, binding = 5, std430) buffer DebugInfo {
+layout(set = 0, binding = 5, std430) readonly buffer GlobalMinBuffer {
+    uint globalMinMaxPos;
+};
+
+layout(set = 0, binding = 6, std430) buffer DebugInfo {
     uint debugMinMaxPos;
     uint debugNumRoots;
     uint debugPad0;
@@ -54,8 +66,6 @@ layout(push_constant) uniform PushConstants {
 
 layout(location = 0) out vec4 outColor;
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
 vec4 unpackColor(uint packed) {
     return vec4(
         float(packed & 0xFFu) / 255.0,
@@ -64,30 +74,6 @@ vec4 unpackColor(uint packed) {
         float((packed >> 24u) & 0xFFu) / 255.0
     );
 }
-
-uint findMinMaxPosition(out uint rootCount) {
-    uint minPos = NULL_IDX;
-    rootCount = 0u;
-    for (uint i = 0u; i < MAX_GLOBAL_ROOTS; i++) {
-        if (rootTable[i] == NULL_IDX) break;
-        rootCount++;
-        uint pos = rootTable[MAX_GLOBAL_ROOTS + i];
-        minPos = min(minPos, pos);
-    }
-    return minPos;
-}
-
-bool isRootInFrontLayer(uint root, uint minMaxPos) {
-    for (uint i = 0u; i < MAX_GLOBAL_ROOTS; i++) {
-        if (rootTable[i] == NULL_IDX) break;
-        if (rootTable[i] == root) {
-            return rootTable[MAX_GLOBAL_ROOTS + i] == minMaxPos;
-        }
-    }
-    return false;
-}
-
-// ─── Main ────────────────────────────────────────────────────────────────────
 
 void main() {
     ivec2 coord = ivec2(gl_FragCoord.xy);
@@ -101,26 +87,26 @@ void main() {
         discard;
     }
 
-    // Compute the global minimum maxPosition
-    uint rootCount;
-    uint minMaxPos = findMinMaxPosition(rootCount);
-
-    // Write debug info (all pixels write the same value — that's fine)
-    // Use atomicMin to avoid partial writes; value is the same from all pixels anyway
-    atomicMin(debugMinMaxPos, minMaxPos);
-    atomicMax(debugNumRoots, rootCount);
-
+    uint minMaxPos = globalMinMaxPos;
     if (minMaxPos == NULL_IDX) {
+        // No roots registered at all
         discard;
     }
 
-    uint root = parent[idx];
+    // Write debug info (same value from all pixels — one atomic is fine)
+    atomicMin(debugMinMaxPos, minMaxPos);
 
-    if (isRootInFrontLayer(root, minMaxPos)) {
+    uint root = parent[idx];
+    uint validCount = min(counter, uint(rootMaxPos.length()));
+
+    if (root < validCount && rootMaxPos[root] == minMaxPos) {
+        // This root is in the front layer — output it
         outColor = unpackColor(nodes[idx].color);
-        uint next = nodes[idx].next;
-        imageStore(headPointerImage, coord, uvec4(next));
+
+        // Advance head past this fragment
+        imageStore(headPointerImage, coord, uvec4(nodes[idx].next));
     } else {
+        // Not in front layer — leave for later peel
         discard;
     }
 }
