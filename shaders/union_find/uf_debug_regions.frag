@@ -189,19 +189,16 @@ void main() {
         outColor = vec4(heat, 1.0);
     }
     else if (targetLayer == 6u) {
-        // Mode 6: Peel layer visualization
-        // Shows which peel iteration would output this pixel's front root.
+        // Mode 6: Peel layer visualization overlaid on fragment color
         //
         // rootMaxPos[root] = the worst-case (deepest) position of this root
         // globalMinMaxPos  = the smallest maxPos among all visible roots
         // layerIdx         = how many peel iterations before this root gets output
-        //
-        // Layer 0 (red)  = peels first
-        // Layer 1 (green) = peels second
-        // White = root out of bounds
+
+        vec3 fragColor = unpackColor(nodes[idx].color).rgb;
 
         if (root >= validCount) {
-            outColor = vec4(1.0, 1.0, 1.0, 1.0);  // White = invalid root
+            outColor = vec4(mix(fragColor, vec3(1.0), 0.5), 1.0);  // Whiteish tint
             return;
         }
 
@@ -209,19 +206,16 @@ void main() {
         uint minPos = globalMinMaxPos;
 
         if (maxPos == 0u && minPos == 0u) {
-            // Unwritten root (rootMaxPos was cleared to 0 and never atomicMax'd)
-            // This means this root has no registered fragments — shouldn't happen
-            // but handle gracefully
-            outColor = vec4(0.3, 0.3, 0.3, 1.0);  // Gray = unregistered
+            outColor = vec4(mix(fragColor, vec3(0.3), 0.5), 1.0);  // Gray tint
         }
         else if (minPos == NULL_IDX) {
-            // No roots registered at all
-            outColor = vec4(0.5, 0.0, 0.5, 1.0);  // Dark magenta = empty scene
+            outColor = vec4(mix(fragColor, vec3(0.5, 0.0, 0.5), 0.5), 1.0);  // Magenta tint
         }
         else {
             uint layerIdx = maxPos - minPos;
             layerIdx = min(layerIdx, 31u);
-            outColor = vec4(LAYER_COLORS[layerIdx], 1.0);
+            vec3 layerColor = LAYER_COLORS[layerIdx];
+            outColor = vec4(mix(fragColor, layerColor, 0.4), 1.0);
         }
     }
     else if (targetLayer == 7u) {

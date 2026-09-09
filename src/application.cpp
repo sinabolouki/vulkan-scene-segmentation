@@ -512,8 +512,8 @@ void Application::initCamera() {
 
     m_camera.target = center;
     // m_camera.target = glm::vec3(-7.493f,5.453f,-3.652f);
-    m_camera.distance = radius * 0.1f;
-    m_camera.distance = 2.74f;
+    m_camera.distance = radius * 1.0f;
+    // m_camera.distance = 2.74f;
     m_camera.yaw = 0.0f;
     m_camera.pitch = 0.3f;
     m_camera.updateFromOrbit();
