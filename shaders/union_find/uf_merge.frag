@@ -30,6 +30,7 @@ layout(set = 0, binding = 0, r32ui) uniform readonly uimage2D headPointerImage;
 
 struct FragmentNode {
     uint  color;
+    uint  unshadedColor;  // Packed RGBA8 (unlit base color)
     float depth;       // Linear depth normalized to [0,1]
     float normalX;     // View-space normal X
     float normalY;     // View-space normal Y
@@ -61,6 +62,7 @@ layout(push_constant) uniform PushConstants {
     float projX;             // projection[0][0]
     float projY;             // projection[1][1]
     float colorThreshold;
+    uint  mergeMode;          // 0 = balanced, 1 = color priority, 2 = space priority
 } pc;
 
 // ─── Soft-cost weights ───────────────────────────────────────────────────────
@@ -69,6 +71,8 @@ const float W_NORMAL       = 0.25;
 const float W_DEPTH        = 0.25;
 const float W_COLOR        = 0.25;  // Set > 0 to enable color-based filtering
 const float COST_THRESHOLD = 1.0;
+const float VETO_THRESHOLD = 1.0;  // If any term exceeds this, reject immediately
+const float ACCEPT_THRESHOLD = 0.0;  // If all terms are below this, accept immediately
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -129,11 +133,6 @@ float colorDistance(uint packedA, uint packedB) {
 // ─── Soft-Cost Connectivity ──────────────────────────────────────────────────
 
 float connectionCost(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
-    // Optional color veto
-    // if (W_COLOR > 0.0) {
-    //     float colDist = colorDistance(nodes[idxA].color, nodes[idxB].color);
-    //     if (colDist > pc.colorThreshold) return 1e30;
-    // }
 
     float depthA = nodes[idxA].depth;
     float depthB = nodes[idxB].depth;
@@ -144,21 +143,17 @@ float connectionCost(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
 
     vec3 normalA = getNodeNormal(idxA);
     vec3 normalB = getNodeNormal(idxB);
-
     float normalDot = dot(normalA, normalB);
 
-    // Adaptive spatial scale from actual pixel spacing at this depth
     float refDepth = 0.5 * (depthA + depthB);
     float pixelStep = computePixelStep(pixelA, pixelB, refDepth);
 
-    // ── Term 1: normal deviation ─────────────────────────────────────────
+    // ── Spatial terms ────────────────────────────────────────────────────
     float normalTerm = (1.0 - normalDot) * 0.5;
 
-    // ── Term 2: depth-space proximity ────────────────────────────────────
     float depthDelta = length(delta);
     float depthTerm  = depthDelta / max(pc.proximityScale * pixelStep, 1e-6);
 
-    // ── Term 3: tangent-plane residual ───────────────────────────────────
     float planeTerm;
     if (normalDot > 0.25) {
         float residualA   = abs(dot(normalA,  delta));
@@ -169,20 +164,45 @@ float connectionCost(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
         planeTerm = 0.0;
     }
 
-    // ── Term 4: color (optional) ─────────────────────────────────────────
-    float colorTerm = 0.0;
-    if (W_COLOR > 0.0) {
-        float colDist = colorDistance(nodes[idxA].color, nodes[idxB].color);
-        colorTerm = colDist / max(pc.colorThreshold, 1e-6);
+    float spatialCost = W_PLANE * planeTerm + W_NORMAL * normalTerm + W_DEPTH * depthTerm;
+    // Normalize so that 1.0 = threshold (spatial terms sum to 0.75 max weight)
+    float spatialNorm = spatialCost / (W_PLANE + W_NORMAL + W_DEPTH);
+
+    // ── Color term ───────────────────────────────────────────────────────
+    float colDist = colorDistance(nodes[idxA].unshadedColor, nodes[idxB].unshadedColor);
+    float colorNorm = colDist / max(pc.colorThreshold, 1e-6);
+
+    // ── Mode 0: Balanced (weighted sum of all terms) ─────────────────────
+    if (pc.mergeMode == 0u) {
+        float cost = W_PLANE  * planeTerm
+                   + W_NORMAL * normalTerm
+                   + W_DEPTH  * depthTerm
+                   + W_COLOR  * colorNorm;
+
+        return (cost >= COST_THRESHOLD) ? 1e30 : cost;
     }
 
-    float cost = W_PLANE  * planeTerm
-               + W_NORMAL * normalTerm
-               + W_DEPTH  * depthTerm
-               + W_COLOR  * colorTerm;
+    // ── Mode 1: Color priority ───────────────────────────────────────────
+    //    If colors differ beyond threshold → reject immediately.
+    //    Otherwise, decide using spatial terms only.
+    if (pc.mergeMode == 1u) {
+        if (colorNorm < ACCEPT_THRESHOLD) return colorNorm * 0.5;  // Accept early
+        if (colorNorm >= VETO_THRESHOLD)  return 1e30;             // Reject early
+        return (spatialNorm >= 1.0) ? 1e30 : spatialNorm;            // Spatial decides
+    }
 
-    if (cost >= COST_THRESHOLD) return 1e30;
-    return cost;
+    // ── Mode 2: Space priority ───────────────────────────────────────────
+    //    Space very similar  → accept immediately (skip color)
+    //    Space very different → reject immediately (skip color)
+    //    Space in between    → color decides
+    if (pc.mergeMode == 2u) {
+        if (spatialNorm < ACCEPT_THRESHOLD) return spatialNorm * 0.5;  // Accept early
+        if (spatialNorm >= VETO_THRESHOLD)  return 1e30;               // Reject early
+        return (colorNorm >= 1.0) ? 1e30 : colorNorm;                    // Color decides
+    }
+
+    // Fallback (shouldn't reach here)
+    return 1e30;
 }
 
 // ─── Union-Find ──────────────────────────────────────────────────────────────

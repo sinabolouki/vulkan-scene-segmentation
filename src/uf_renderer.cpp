@@ -1587,6 +1587,7 @@ void UFRenderer::recordMergePhase(VkCommandBuffer cmd)
     pc.projX = m_projX;
     pc.projY = m_projY;
     pc.colorThreshold = colorThreshold;
+    pc.mergeMode = mergeMode;
     vkCmdPushConstants(cmd, m_fullscreenPipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
 

@@ -14,6 +14,7 @@ struct SceneObject;
 // GPU-side fragment node — must match GLSL layout exactly (28 bytes)
 struct UFFragmentNode {
     uint32_t color;      // Packed RGBA8
+    uint32_t unshadedColor; // Packed RGBA8 (unshaded, for color-based merging)
     float    depth;      // Fragment depth [0, 1] linear
     float    normalX;    // View-space normal X
     float    normalY;    // View-space normal Y
@@ -35,11 +36,13 @@ public:
 
     // Runtime parameters (adjustable via ImGui)
     float planeThreshold = 1.5f;
-    float proximityScale = 3.0f;
-    float colorThreshold = 0.4f;
+    float proximityScale = 0.7f;
+    float colorThreshold = 0.05f;
     int debugDisplayLayer = -1;
+    uint32_t mergeMode = 0;  // 0 = balanced, 1 = color priority, 2 = space priority
 
-    int debugVisualizationMode = -1;  // -1 = normal peeling, 0-7 = debug visualization modes
+
+    int debugVisualizationMode = 4;  // -1 = normal peeling, 0-7 = debug visualization modes
 
     float nearPlane = 0.1f;
     float farPlane = 100.0f;

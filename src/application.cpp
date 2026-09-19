@@ -45,8 +45,8 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
     // Scene
     // std::string scenePath = "../assets/circles16.obj";
     // std::string scenePath = "../assets/simple_scene.obj";
-    // std::string scenePath = "assets/sponza/sponza.obj";
-    std::string scenePath = "assets/simple_room/simple_room.obj";
+    std::string scenePath = "assets/sponza/sponza.obj";
+    // std::string scenePath = "assets/simple_room/simple_room.obj";
     // std::string scenePath = "assets/office/model.obj";
     if (!m_scene.loadFromOBJ(scenePath))
     {
@@ -136,6 +136,26 @@ void Application::drawFrame()
      #ifdef RENDER_METHOD_UNION_FIND
     ImGui::Begin("Union-Find Renderer");
 
+    ImGui::Separator();
+    const char* mergeModes[] = {
+        "Balanced (weighted sum)",
+        "Color Priority (color veto → spatial)",
+        "Space Priority (spatial veto → color)"
+    };
+    int currentMode = (int)m_renderer.mergeMode;
+    if (ImGui::Combo("Merge Mode", &currentMode, mergeModes, IM_ARRAYSIZE(mergeModes))) {
+        m_renderer.mergeMode = (uint32_t)currentMode;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Mode 0: All terms weighted equally into one cost.\n"
+            "Mode 1: Color checked first — if colors differ, fragments\n"
+            "        are never merged regardless of spatial proximity.\n"
+            "Mode 2: Spatial checked first — if geometry says different,\n"
+            "        fragments are never merged regardless of color."
+        );
+    }
+
     // ─── Connectivity Parameters ───
     ImGui::Text("Connectivity Parameters");
     ImGui::Separator();
@@ -162,6 +182,12 @@ void Application::drawFrame()
 
     // ─── Performance ───
     ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameTimeMs);
+    ImGui::Text("Camera data: ");
+    ImGui::Text("pos  X: %.2f, Y: %.2f, Z: %.2f", m_camera.position.x, m_camera.position.y, m_camera.position.z);
+    ImGui::Text("target  X: %.2f, Y: %.2f, Z: %.2f", m_camera.target.x, m_camera.target.y, m_camera.target.z);
+    ImGui::Text("Near/Far: %.3f / %.1f", m_renderer.nearPlane, m_renderer.farPlane);
+    ImGui::Text("Camera distance: %.2f", m_camera.distance);
+    ImGui::Text("Camera Pitch: %.2f, Yaw: %.2f", m_camera.pitch, m_camera.yaw);
     ImGui::Separator();
 
     if (m_renderer.enableTiming) {
@@ -511,11 +537,13 @@ void Application::initCamera() {
     float radius = m_scene.getRadius();
 
     m_camera.target = center;
-    // m_camera.target = glm::vec3(-7.493f,5.453f,-3.652f);
     m_camera.distance = radius * 1.0f;
-    // m_camera.distance = 2.74f;
     m_camera.yaw = 0.0f;
     m_camera.pitch = 0.3f;
+    // m_camera.target = glm::vec3(-7.68f, 7.01f, 15.53f);
+    // m_camera.distance = 26.20f;
+    // m_camera.yaw = -0.76f;
+    // m_camera.pitch = 0.38f;
     m_camera.updateFromOrbit();
 }
 

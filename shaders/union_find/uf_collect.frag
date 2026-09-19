@@ -19,6 +19,7 @@ layout(set = 0, binding = 0, r32ui) uniform coherent uimage2D headPointerImage;
 
 struct FragmentNode {
     uint  color;
+    uint  unshadedColor;  // Packed RGBA8 (unlit base color)
     float depth;
     float normalX;
     float normalY;
@@ -90,6 +91,7 @@ void main() {
 
     // Write node
     nodes[nodeIndex].color    = packColor(finalColor);
+    nodes[nodeIndex].unshadedColor = packColor(vec4(baseColor, 1.0));
     nodes[nodeIndex].depth    = normalizedDepth;
     nodes[nodeIndex].normalX  = normal.x;
     nodes[nodeIndex].normalY  = normal.y;
