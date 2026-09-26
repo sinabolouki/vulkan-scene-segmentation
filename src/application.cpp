@@ -4,7 +4,12 @@
 #include <iostream>
 #include <array>
 #include <cstring>
+#include <cstdio>
+#include <stdexcept>
 #include <imgui.h>
+#ifdef RENDER_METHOD_SAM2
+#include "sam2/sam2_io.h"
+#endif
 
 void Application::framebufferResizeCallback(GLFWwindow *window, int width, int height)
 {
@@ -66,8 +71,19 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
     m_renderer.setTextureManager(&m_textureManager);
 
     // Renderer
+#ifdef RENDER_METHOD_SAM2
+    {
+        Sam2Renderer::Config cfg{};
+        cfg.width = m_swapchain.getExtent().width;
+        cfg.height = m_swapchain.getExtent().height;
+        cfg.maxLayers = UFRenderer::NUM_LAYERS;
+        if (!m_renderer.init(m_context, cfg))
+            return false;
+    }
+#else
     if (!m_renderer.init(m_context, m_swapchain))
         return false;
+#endif
 
     if (!m_imguiManager.init(m_context, m_swapchain, m_window))
         return false;
@@ -78,7 +94,6 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
 #elif defined(RENDER_METHOD_PPLL)
     std::cout << "[App] Render method: PER-PIXEL LINKED LIST" << std::endl;
 #endif
-
 
     // Initialize camera after scene is loaded
     initCamera();
@@ -93,25 +108,40 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
 
 void Application::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex)
 {
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(cmd, &beginInfo);
 
     // Camera
-    float aspect = (float)m_swapchain.getExtent().width / (float)m_swapchain.getExtent().height;
+    const VkExtent2D extent = m_swapchain.getExtent();
+    float aspect = (float)extent.width / (float)extent.height;
     glm::mat4 view = m_camera.getViewMatrix();
     m_renderer.nearPlane = 0.01f;
-    m_renderer.farPlane = m_camera.distance * 10.0f;
-    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, m_renderer.nearPlane, m_renderer.farPlane);
+    m_renderer.farPlane  = m_camera.distance * 10.0f;
+    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect,
+                                      m_renderer.nearPlane, m_renderer.farPlane);
     glm::mat4 viewProj = proj * view;
 
+#ifdef RENDER_METHOD_SAM2
+    // 1) PPLL collect + sort + resolve layer 0 into the renderer's offscreen image
+    m_renderer.recordPreview(cmd,
+                             m_vertexBuffer, m_indexBuffer,
+                             m_scene.getObjects(),
+                             viewProj, view, proj);
+
+    // 2) Blit layer 0 into the swapchain image and leave it in PRESENT_SRC_KHR,
+    //    which is exactly the initialLayout ImGui's LOAD_OP_LOAD render pass expects.
+    m_renderer.recordBlitPreviewToSwapchain(cmd,
+                                            m_swapchain.getImage(imageIndex),
+                                            extent);
+#else
     m_renderer.recordCommands(cmd, m_context, m_swapchain,
                               m_vertexBuffer, m_indexBuffer,
                               m_scene.getObjects(),
                               viewProj, view, proj, imageIndex);
+#endif
 
-    m_imguiManager.render(cmd, m_swapchain.getExtent(),
-                          m_imguiManager.getFramebuffer(imageIndex));
+    // 3) ImGui on top
+    m_imguiManager.render(cmd, extent, m_imguiManager.getFramebuffer(imageIndex));
 
     vkEndCommandBuffer(cmd);
 }
@@ -128,32 +158,65 @@ void Application::drawFrame()
     m_fps = 1000.0 / m_frameTimeMs;
     m_lastFrameTime = now;
 
+#ifdef RENDER_METHOD_SAM2
+    // ─── SAM2 capture request (deferred from ImGui button click) ─────
+    if (m_sam2CaptureNow)
+    {
+        m_sam2CaptureNow = false;
+
+        // Wait for any in-flight frame so vertex/index buffers are safe to read
+        // and so the sam2 renderer's PPLL isn't racing with a preview.
+        vkDeviceWaitIdle(m_context.device);
+
+        float aspect = (float)m_swapchain.getExtent().width / (float)m_swapchain.getExtent().height;
+        glm::mat4 view = m_camera.getViewMatrix();
+        glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect,
+                                          m_renderer.nearPlane, m_renderer.farPlane);
+        glm::mat4 viewProj = proj * view;
+
+        try
+        {
+            m_sam2LastCapture = m_renderer.captureSnapshot(
+                m_context,
+                m_vertexBuffer, m_indexBuffer,
+                m_scene.getObjects(),
+                viewProj, view, proj);
+
+            sam2::saveCapturedLayers(m_sam2LastCapture, m_sam2OutputDir, /*skipEmpty=*/true);
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "[App] SAM2 capture failed: " << e.what() << std::endl;
+        }
+    }
+#endif
+
     // Begin ImGui frame (before fence wait is fine — ImGui just builds draw lists)
     m_imguiManager.beginFrame();
     updateCamera();
 
     // ─── ImGui UI ───
-     #ifdef RENDER_METHOD_UNION_FIND
+#ifdef RENDER_METHOD_UNION_FIND
     ImGui::Begin("Union-Find Renderer");
 
     ImGui::Separator();
-    const char* mergeModes[] = {
+    const char *mergeModes[] = {
         "Balanced (weighted sum)",
         "Color Priority (color veto → spatial)",
-        "Space Priority (spatial veto → color)"
-    };
+        "Space Priority (spatial veto → color)"};
     int currentMode = (int)m_renderer.mergeMode;
-    if (ImGui::Combo("Merge Mode", &currentMode, mergeModes, IM_ARRAYSIZE(mergeModes))) {
+    if (ImGui::Combo("Merge Mode", &currentMode, mergeModes, IM_ARRAYSIZE(mergeModes)))
+    {
         m_renderer.mergeMode = (uint32_t)currentMode;
     }
-    if (ImGui::IsItemHovered()) {
+    if (ImGui::IsItemHovered())
+    {
         ImGui::SetTooltip(
             "Mode 0: All terms weighted equally into one cost.\n"
             "Mode 1: Color checked first — if colors differ, fragments\n"
             "        are never merged regardless of spatial proximity.\n"
             "Mode 2: Spatial checked first — if geometry says different,\n"
-            "        fragments are never merged regardless of color."
-        );
+            "        fragments are never merged regardless of color.");
     }
 
     // ─── Connectivity Parameters ───
@@ -174,9 +237,9 @@ void Application::drawFrame()
     ImGui::SliderFloat("Color Threshold", &m_renderer.colorThreshold, 0.05f, 1.5f, "%.2f");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Chromaticity distance veto.\n"
-                        "Lower = stricter (splits at subtle color changes).\n"
-                        "Higher = more permissive (only rejects very different materials).\n"
-                        "0.4 = good default for textured scenes.");
+                          "Lower = stricter (splits at subtle color changes).\n"
+                          "Higher = more permissive (only rejects very different materials).\n"
+                          "0.4 = good default for textured scenes.");
 
     ImGui::Separator();
 
@@ -190,8 +253,9 @@ void Application::drawFrame()
     ImGui::Text("Camera Pitch: %.2f, Yaw: %.2f", m_camera.pitch, m_camera.yaw);
     ImGui::Separator();
 
-    if (m_renderer.enableTiming) {
-        auto& t = m_renderer.timingResults;
+    if (m_renderer.enableTiming)
+    {
+        auto &t = m_renderer.timingResults;
         ImGui::Text("GPU Timing (ms):");
         ImGui::Separator();
         ImGui::Text("  Clear:        %6.3f", t.clear);
@@ -202,8 +266,10 @@ void Application::drawFrame()
         ImGui::Text("  Compress:     %6.3f", t.compress);
         ImGui::Separator();
 
-        for (uint32_t i = 0; i < m_renderer.NUM_LAYERS; i++) {
-            if (ImGui::TreeNode((void*)(intptr_t)i, "Peel %d: %6.3f ms", i, t.peels[i].total)) {
+        for (uint32_t i = 0; i < m_renderer.NUM_LAYERS; i++)
+        {
+            if (ImGui::TreeNode((void *)(intptr_t)i, "Peel %d: %6.3f ms", i, t.peels[i].total))
+            {
                 ImGui::Text("  Clear Table: %6.3f", t.peels[i].clearTable);
                 ImGui::Text("  Register:    %6.3f", t.peels[i].registerRoots);
                 ImGui::Text("  Resolve:     %6.3f", t.peels[i].resolve);
@@ -232,22 +298,23 @@ void Application::drawFrame()
     // In your ImGui panel:
     ImGui::Separator();
     ImGui::Text("Debug Visualization");
-    
-    const char* debugModes[] = {
-        "Normal Rendering",     // -1
-        "Region ID (root)",     //  0
-        "Object ID",            //  1
-        "Depth",                //  2
-        "View Normals",         //  3
-        "Fragment Color",       //  4
-        "Fragment Count Heat",   //  5
-        "Peel Layer",           //  6
+
+    const char *debugModes[] = {
+        "Normal Rendering",    // -1
+        "Region ID (root)",    //  0
+        "Object ID",           //  1
+        "Depth",               //  2
+        "View Normals",        //  3
+        "Fragment Color",      //  4
+        "Fragment Count Heat", //  5
+        "Peel Layer",          //  6
         "Region Rank Span"     //  7
     };
-    
+
     // Offset by 1 so index 0 = "Normal Rendering" = debugVisualizationMode -1
     int current = m_renderer.debugVisualizationMode + 1;
-    if (ImGui::Combo("Vis Mode", &current, debugModes, IM_ARRAYSIZE(debugModes))) {
+    if (ImGui::Combo("Vis Mode", &current, debugModes, IM_ARRAYSIZE(debugModes)))
+    {
         m_renderer.debugVisualizationMode = current - 1;
     }
 
@@ -255,23 +322,26 @@ void Application::drawFrame()
     ImGui::Text("GPU Debug Info (Peel Layer 0):");
     ImGui::Text("  Min maxPosition:   %u", m_renderer.debugGPUInfo.minMaxPos);
     ImGui::Text("  Registered roots:  %u / %u", m_renderer.debugGPUInfo.numRegisteredRoots, UFRenderer::MAX_GLOBAL_ROOTS);
-    
-    if (m_renderer.debugGPUInfo.minMaxPos > 0) {
-        ImGui::TextColored(ImVec4(1, 1, 0, 1), 
-            "  Warning: No root has maxPos=0 (min=%u)", m_renderer.debugGPUInfo.minMaxPos);
+
+    if (m_renderer.debugGPUInfo.minMaxPos > 0)
+    {
+        ImGui::TextColored(ImVec4(1, 1, 0, 1),
+                           "  Warning: No root has maxPos=0 (min=%u)", m_renderer.debugGPUInfo.minMaxPos);
     }
-    if (m_renderer.debugGPUInfo.numRegisteredRoots >= UFRenderer::MAX_GLOBAL_ROOTS) {
-        ImGui::TextColored(ImVec4(1, 0, 0, 1), 
-            "  ERROR: Root table full! Increase MAX_GLOBAL_ROOTS");
+    if (m_renderer.debugGPUInfo.numRegisteredRoots >= UFRenderer::MAX_GLOBAL_ROOTS)
+    {
+        ImGui::TextColored(ImVec4(1, 0, 0, 1),
+                           "  ERROR: Root table full! Increase MAX_GLOBAL_ROOTS");
     }
 
     // ─── Debug Info ───
-    if (ImGui::CollapsingHeader("Debug Info")) {
+    if (ImGui::CollapsingHeader("Debug Info"))
+    {
         ImGui::Text("Resolution: %u x %u", m_renderer.getWidth(), m_renderer.getHeight());
         ImGui::Text("Node Capacity: %u", m_renderer.getNodeBufferCapacity());
         ImGui::Text("Node Size: %zu bytes", sizeof(UFFragmentNode));
         ImGui::Text("Node Buffer: %.1f MB",
-            m_renderer.getNodeBufferCapacity() * sizeof(UFFragmentNode) / (1024.0f * 1024.0f));
+                    m_renderer.getNodeBufferCapacity() * sizeof(UFFragmentNode) / (1024.0f * 1024.0f));
         ImGui::Text("Near/Far: %.3f / %.1f", m_renderer.nearPlane, m_renderer.farPlane);
     }
 
@@ -280,8 +350,8 @@ void Application::drawFrame()
     ImGui::Begin("PPLL Renderer");
     ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameTimeMs);
     ImGui::Separator();
-    //ImGui::SliderFloat("Depth Threshold", &m_renderer.depthThreshold, 0.001f, 0.1f, "%.4f");
-    //ImGui::SliderFloat("Color Threshold", &m_renderer.colorThreshold, 0.01f, 0.5f, "%.3f");
+    // ImGui::SliderFloat("Depth Threshold", &m_renderer.depthThreshold, 0.001f, 0.1f, "%.4f");
+    // ImGui::SliderFloat("Color Threshold", &m_renderer.colorThreshold, 0.01f, 0.5f, "%.3f");
     int grow = (int)m_renderer.growIterations;
     ImGui::SliderInt("Grow Iterations", &grow, 1, 100);
     m_renderer.growIterations = (uint32_t)grow;
@@ -306,47 +376,92 @@ void Application::drawFrame()
     ImGui::Text("CameraPos: %.3f , %.3f , %.3f", m_camera.position.x, m_camera.position.y, m_camera.position.z);
     ImGui::Text("CameraTarget: %.3f , %.3f , %.3f", m_camera.target.x, m_camera.target.y, m_camera.target.z);
     ImGui::End();
+#elif defined(RENDER_METHOD_SAM2)
+    ImGui::Begin("SAM2 Offline Capture");
+    ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameTimeMs);
+    ImGui::Separator();
+
+    ImGui::Text("Scene: %s", "sponza");
+    ImGui::Text("Objects: %u", (uint32_t)m_scene.getObjects().size());
+    ImGui::Text("Vertices: %u", m_scene.getTotalVertexCount());
+    ImGui::Text("Triangles: %u", m_scene.getTotalIndexCount() / 3);
+    ImGui::Text("Textures: %u", m_textureManager.getTextureCount());
+    ImGui::Separator();
+
+    ImGui::Text("Camera dist: %.2f | pitch: %.2f | yaw: %.2f",
+                m_camera.distance, m_camera.pitch, m_camera.yaw);
+    ImGui::Text("Near/Far: %.3f / %.1f", m_renderer.nearPlane, m_renderer.farPlane);
+    ImGui::Separator();
+
+    // Output directory (editable)
+    {
+        char buf[256];
+        std::snprintf(buf, sizeof(buf), "%s", m_sam2OutputDir.c_str());
+        if (ImGui::InputText("Output dir", buf, sizeof(buf)))
+            m_sam2OutputDir = buf;
+    }
+
+    // Capture button
+    ImGui::BeginDisabled(m_sam2CaptureNow);
+    if (ImGui::Button("Capture snapshot (all layers -> PNG)", ImVec2(-1, 0)))
+    {
+        m_sam2CaptureNow = true;
+    }
+    ImGui::EndDisabled();
+
+    if (m_sam2CaptureNow)
+        ImGui::TextColored(ImVec4(1, 1, 0, 1), "Capturing on next frame...");
+
+    if (!m_sam2LastCapture.empty())
+    {
+        ImGui::Separator();
+        ImGui::Text("Last capture: %zu layers, %ux%u",
+                    m_sam2LastCapture.size(),
+                    m_sam2LastCapture.front().width,
+                    m_sam2LastCapture.front().height);
+        ImGui::Text("Saved to: %s/", m_sam2OutputDir.c_str());
+    }
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Preview and SAM2 client come in later milestones.");
+    ImGui::End();
 #endif
     // ─── End ImGui UI ───
 
-    VkDevice device = m_context.device;
-
     VkFence inFlightFence = m_swapchain.getInFlightFence(m_currentFrame);
-    vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+    vkWaitForFences(m_context.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
 
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
-        device, m_swapchain.getSwapchain(), UINT64_MAX,
+        m_context.device, m_swapchain.getSwapchain(), UINT64_MAX,
         m_swapchain.getImageAvailableSemaphore(m_currentFrame),
         VK_NULL_HANDLE, &imageIndex);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR)
     {
-        int w, h;
-        glfwGetFramebufferSize(m_window, &w, &h);
-        m_swapchain.recreate(m_context, (uint32_t)w, (uint32_t)h);
-        m_renderer.recreate(m_context, m_swapchain);
-        m_imguiManager.recreate(m_context, m_swapchain);
+        ImGui::Render();          // close the ImGui frame we already started
+        recreateSwapchain();
         return;
     }
 
-    vkResetFences(device, 1, &inFlightFence);
+    vkResetFences(m_context.device, 1, &inFlightFence);
     vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0);
     recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex);
 
-    VkSemaphore waitSemaphores[] = {m_swapchain.getImageAvailableSemaphore(m_currentFrame)};
+    VkSemaphore waitSemaphores[]      = {m_swapchain.getImageAvailableSemaphore(m_currentFrame)};
+    // The SAM2 blit barrier uses COLOR_ATTACHMENT_OUTPUT as its srcStage, so it chains
+    // correctly with this wait stage; no need to add TRANSFER here.
     VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    VkSemaphore signalSemaphores[] = {m_swapchain.getRenderFinishedSemaphore(m_currentFrame)};
+    VkSemaphore signalSemaphores[]    = {m_swapchain.getRenderFinishedSemaphore(m_currentFrame)};
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.waitSemaphoreCount = 1;
-    submitInfo.pWaitSemaphores = waitSemaphores;
-    submitInfo.pWaitDstStageMask = waitStages;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &m_commandBuffers[m_currentFrame];
+    VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submitInfo.waitSemaphoreCount   = 1;
+    submitInfo.pWaitSemaphores      = waitSemaphores;
+    submitInfo.pWaitDstStageMask    = waitStages;
+    submitInfo.commandBufferCount   = 1;
+    submitInfo.pCommandBuffers      = &m_commandBuffers[m_currentFrame];
     submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores = signalSemaphores;
+    submitInfo.pSignalSemaphores    = signalSemaphores;
 
     if (vkQueueSubmit(m_context.graphics_queue, 1, &submitInfo, inFlightFence) != VK_SUCCESS)
     {
@@ -358,11 +473,7 @@ void Application::drawFrame()
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || m_framebufferResized)
     {
         m_framebufferResized = false;
-        int w, h;
-        glfwGetFramebufferSize(m_window, &w, &h);
-        m_swapchain.recreate(m_context, (uint32_t)w, (uint32_t)h);
-        m_renderer.recreate(m_context, m_swapchain);
-        m_imguiManager.recreate(m_context, m_swapchain);
+        recreateSwapchain();
     }
 
     m_currentFrame = (m_currentFrame + 1) % SwapchainManager::MAX_FRAMES_IN_FLIGHT;
@@ -371,13 +482,14 @@ void Application::drawFrame()
 // Add the callback implementation:
 void Application::keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods)
 {
-    #ifndef RENDER_METHOD_SIMPLE
+#if !defined(RENDER_METHOD_SIMPLE) && !defined(RENDER_METHOD_SAM2)
     if (action != GLFW_PRESS)
         return;
 
     auto app = reinterpret_cast<Application *>(glfwGetWindowUserPointer(window));
 
     // Inside keyCallback:
+
     if (action == GLFW_PRESS || action == GLFW_REPEAT)
     {
         auto *app = reinterpret_cast<Application *>(glfwGetWindowUserPointer(window));
@@ -400,7 +512,7 @@ void Application::keyCallback(GLFWwindow *window, int key, int scancode, int act
             break; // Layer 3
         }
     }
-    #endif
+#endif
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -423,8 +535,8 @@ void Application::cleanup()
     vkDeviceWaitIdle(device);
 
     m_imguiManager.destroy(device);
-    m_textureManager.destroy(m_context.device);
-    m_renderer.destroy(device);
+    m_renderer.destroy(device);               // first: its pipeline layout uses the texture set layout
+    m_textureManager.destroy(device);
 
     vkDestroyBuffer(device, m_indexBuffer, nullptr);
     vkFreeMemory(device, m_indexBufferMemory, nullptr);
@@ -532,7 +644,8 @@ uint32_t Application::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags 
 // Camera
 // ─────────────────────────────────────────────────────────────────────────────
 
-void Application::initCamera() {
+void Application::initCamera()
+{
     glm::vec3 center = m_scene.getCenter();
     float radius = m_scene.getRadius();
 
@@ -547,17 +660,20 @@ void Application::initCamera() {
     m_camera.updateFromOrbit();
 }
 
-void Application::updateCamera() {
+void Application::updateCamera()
+{
     // Don't process camera input if ImGui wants the mouse
-    if (ImGui::GetIO().WantCaptureMouse) {
-        m_firstMouse = true;  // reset so we don't get a jump when returning to viewport
+    if (ImGui::GetIO().WantCaptureMouse)
+    {
+        m_firstMouse = true; // reset so we don't get a jump when returning to viewport
         return;
     }
 
     double mouseX, mouseY;
     glfwGetCursorPos(m_window, &mouseX, &mouseY);
 
-    if (m_firstMouse) {
+    if (m_firstMouse)
+    {
         m_lastMouseX = mouseX;
         m_lastMouseY = mouseY;
         m_firstMouse = false;
@@ -569,15 +685,17 @@ void Application::updateCamera() {
     m_lastMouseY = mouseY;
 
     // Left mouse: orbit
-    if (glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS) {
-        m_camera.yaw   -= float(dx) * m_camera.orbitSpeed;
+    if (glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
+    {
+        m_camera.yaw -= float(dx) * m_camera.orbitSpeed;
         m_camera.pitch += float(dy) * m_camera.orbitSpeed;
         m_camera.pitch = glm::clamp(m_camera.pitch, -1.5f, 1.5f);
         m_camera.updateFromOrbit();
     }
 
     // Middle mouse: pan
-    if (glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS) {
+    if (glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS)
+    {
         glm::vec3 forward = glm::normalize(m_camera.target - m_camera.position);
         glm::vec3 right = glm::normalize(glm::cross(forward, m_camera.up));
         glm::vec3 camUp = glm::normalize(glm::cross(right, forward));
@@ -591,15 +709,18 @@ void Application::updateCamera() {
     // Scroll: zoom (use ImGui's scroll data since ImGui still handles the callback)
     // Alternative: read scroll via ImGui IO
     float scroll = ImGui::GetIO().MouseWheel;
-    if (scroll != 0.0f) {
+    if (scroll != 0.0f)
+    {
         m_camera.distance -= scroll * m_camera.distance * m_camera.zoomSpeed;
         m_camera.distance = glm::max(m_camera.distance, 0.01f);
         m_camera.updateFromOrbit();
     }
 }
 
-bool Application::loadTextures() {
-    if (!m_textureManager.init(m_context)) {
+bool Application::loadTextures()
+{
+    if (!m_textureManager.init(m_context))
+    {
         std::cerr << "[App] Failed to init texture manager" << std::endl;
         return false;
     }
@@ -607,8 +728,10 @@ bool Application::loadTextures() {
     auto texturePaths = m_scene.getTextureFilenames();
     std::cout << "[App] Found " << texturePaths.size() << " textures to load" << std::endl;
 
-    if (!texturePaths.empty()) {
-        if (!m_textureManager.loadTextures(m_context, texturePaths)) {
+    if (!texturePaths.empty())
+    {
+        if (!m_textureManager.loadTextures(m_context, texturePaths))
+        {
             std::cerr << "[App] Failed to load textures" << std::endl;
             return false;
         }
@@ -616,4 +739,31 @@ bool Application::loadTextures() {
     }
 
     return true;
+}
+
+void Application::recreateSwapchain()
+{
+    // Minimized window: wait until it has a real size again (fix #5)
+    int w = 0, h = 0;
+    glfwGetFramebufferSize(m_window, &w, &h);
+    while (w == 0 || h == 0)
+    {
+        glfwWaitEvents();
+        glfwGetFramebufferSize(m_window, &w, &h);
+    }
+
+    vkDeviceWaitIdle(m_context.device);
+
+    m_swapchain.recreate(m_context, (uint32_t)w, (uint32_t)h);
+
+#ifdef RENDER_METHOD_SAM2
+    // Sam2Renderer has its own signature (fix #1)
+    m_renderer.recreate(m_context,
+                        m_swapchain.getExtent().width,
+                        m_swapchain.getExtent().height);
+#else
+    m_renderer.recreate(m_context, m_swapchain);
+#endif
+
+    m_imguiManager.recreate(m_context, m_swapchain);
 }
