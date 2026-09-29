@@ -30,6 +30,9 @@
 #include "simple_renderer.h"
 #elif defined(RENDER_METHOD_SAM2)
 #include "sam2/sam2_renderer.h"
+#include "sam2/sam2_job.h"      // includes sam2_client.h
+#include <future>
+#include <memory>
 #else
 #error "No render method defined! Uncomment one in application.h"
 #endif
@@ -158,13 +161,39 @@ private:
 
     void initCamera();
     void updateCamera();
+    void computeCameraMatrices(glm::mat4& view, glm::mat4& proj);
     double m_lastMouseX = 0, m_lastMouseY = 0;
     bool   m_firstMouse = true;
 
 #ifdef RENDER_METHOD_SAM2
     // ─── SAM2 offline pipeline (m_renderer IS the Sam2Renderer) ───
-    bool                                     m_sam2CaptureNow = false;
-    std::string                              m_sam2OutputDir  = "captures";
-    std::vector<Sam2Renderer::CapturedLayer> m_sam2LastCapture;
+    // Deferred action: capture needs Vulkan -> runs at the start of drawFrame
+    bool m_sam2CaptureNow  = false;
+    bool m_sam2AutoSegment = true;
+
+    // Settings
+    std::string m_sam2OutputDir      = "captures";
+    std::string m_sam2Host           = "127.0.0.1";
+    int         m_sam2Port           = 8765;
+    int         m_sam2PointsPerSide  = 0;      // 0 = server default
+    bool        m_sam2SaveMaskImages = true;
+
+    // Data
+    std::shared_ptr<const sam2::LayerSet> m_sam2LastCapture;   // shared with the worker
+    std::vector<sam2::SegmentResult>      m_sam2Results;       // index == layer index
+
+    // Async state
+    sam2::Sam2Job m_sam2Job;
+    bool          m_sam2JobActive = false;   // main-thread view: job started, not yet reaped
+    std::string   m_sam2Status;
+
+    std::future<std::pair<bool, std::string>> m_sam2HealthFuture;
+    bool m_sam2HealthPending = false;
+
+    void runSam2Capture();
+    bool startSam2Segmentation();
+    void startSam2HealthCheck();
+    void pollSam2Job();
+    void drawSam2Panel();
 #endif
 };

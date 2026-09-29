@@ -6,6 +6,9 @@
 #include <cstring>
 #include <cstdio>
 #include <stdexcept>
+#include <algorithm>
+#include <chrono>
+#include <filesystem>
 #include <imgui.h>
 #ifdef RENDER_METHOD_SAM2
 #include "sam2/sam2_io.h"
@@ -50,8 +53,8 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
     // Scene
     // std::string scenePath = "../assets/circles16.obj";
     // std::string scenePath = "../assets/simple_scene.obj";
-    std::string scenePath = "assets/sponza/sponza.obj";
-    // std::string scenePath = "assets/simple_room/simple_room.obj";
+    // std::string scenePath = "assets/sponza/sponza.obj";
+    std::string scenePath = "assets/simple_room/simple_room.obj";
     // std::string scenePath = "assets/office/model.obj";
     if (!m_scene.loadFromOBJ(scenePath))
     {
@@ -85,6 +88,11 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
         return false;
 #endif
 
+#ifdef RENDER_METHOD_SAM2
+    m_sam2Status = "Checking SAM2 server...";
+    startSam2HealthCheck();   // async: app starts immediately, result appears in the panel
+#endif
+
     if (!m_imguiManager.init(m_context, m_swapchain, m_window))
         return false;
     m_lastFrameTime = std::chrono::high_resolution_clock::now();
@@ -113,12 +121,8 @@ void Application::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex)
 
     // Camera
     const VkExtent2D extent = m_swapchain.getExtent();
-    float aspect = (float)extent.width / (float)extent.height;
-    glm::mat4 view = m_camera.getViewMatrix();
-    m_renderer.nearPlane = 0.01f;
-    m_renderer.farPlane  = m_camera.distance * 10.0f;
-    glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect,
-                                      m_renderer.nearPlane, m_renderer.farPlane);
+    glm::mat4 view, proj;
+    computeCameraMatrices(view, proj);
     glm::mat4 viewProj = proj * view;
 
 #ifdef RENDER_METHOD_SAM2
@@ -159,35 +163,16 @@ void Application::drawFrame()
     m_lastFrameTime = now;
 
 #ifdef RENDER_METHOD_SAM2
-    // ─── SAM2 capture request (deferred from ImGui button click) ─────
+    // Collect finished results / health check (cheap, non-blocking)
+    pollSam2Job();
+
+    // Capture needs the GPU -> done here, outside the frame's command buffer
     if (m_sam2CaptureNow)
     {
         m_sam2CaptureNow = false;
-
-        // Wait for any in-flight frame so vertex/index buffers are safe to read
-        // and so the sam2 renderer's PPLL isn't racing with a preview.
-        vkDeviceWaitIdle(m_context.device);
-
-        float aspect = (float)m_swapchain.getExtent().width / (float)m_swapchain.getExtent().height;
-        glm::mat4 view = m_camera.getViewMatrix();
-        glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect,
-                                          m_renderer.nearPlane, m_renderer.farPlane);
-        glm::mat4 viewProj = proj * view;
-
-        try
-        {
-            m_sam2LastCapture = m_renderer.captureSnapshot(
-                m_context,
-                m_vertexBuffer, m_indexBuffer,
-                m_scene.getObjects(),
-                viewProj, view, proj);
-
-            sam2::saveCapturedLayers(m_sam2LastCapture, m_sam2OutputDir, /*skipEmpty=*/true);
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "[App] SAM2 capture failed: " << e.what() << std::endl;
-        }
+        runSam2Capture();
+        if (m_sam2AutoSegment && m_sam2LastCapture)
+            startSam2Segmentation();       // returns immediately
     }
 #endif
 
@@ -377,54 +362,7 @@ void Application::drawFrame()
     ImGui::Text("CameraTarget: %.3f , %.3f , %.3f", m_camera.target.x, m_camera.target.y, m_camera.target.z);
     ImGui::End();
 #elif defined(RENDER_METHOD_SAM2)
-    ImGui::Begin("SAM2 Offline Capture");
-    ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameTimeMs);
-    ImGui::Separator();
-
-    ImGui::Text("Scene: %s", "sponza");
-    ImGui::Text("Objects: %u", (uint32_t)m_scene.getObjects().size());
-    ImGui::Text("Vertices: %u", m_scene.getTotalVertexCount());
-    ImGui::Text("Triangles: %u", m_scene.getTotalIndexCount() / 3);
-    ImGui::Text("Textures: %u", m_textureManager.getTextureCount());
-    ImGui::Separator();
-
-    ImGui::Text("Camera dist: %.2f | pitch: %.2f | yaw: %.2f",
-                m_camera.distance, m_camera.pitch, m_camera.yaw);
-    ImGui::Text("Near/Far: %.3f / %.1f", m_renderer.nearPlane, m_renderer.farPlane);
-    ImGui::Separator();
-
-    // Output directory (editable)
-    {
-        char buf[256];
-        std::snprintf(buf, sizeof(buf), "%s", m_sam2OutputDir.c_str());
-        if (ImGui::InputText("Output dir", buf, sizeof(buf)))
-            m_sam2OutputDir = buf;
-    }
-
-    // Capture button
-    ImGui::BeginDisabled(m_sam2CaptureNow);
-    if (ImGui::Button("Capture snapshot (all layers -> PNG)", ImVec2(-1, 0)))
-    {
-        m_sam2CaptureNow = true;
-    }
-    ImGui::EndDisabled();
-
-    if (m_sam2CaptureNow)
-        ImGui::TextColored(ImVec4(1, 1, 0, 1), "Capturing on next frame...");
-
-    if (!m_sam2LastCapture.empty())
-    {
-        ImGui::Separator();
-        ImGui::Text("Last capture: %zu layers, %ux%u",
-                    m_sam2LastCapture.size(),
-                    m_sam2LastCapture.front().width,
-                    m_sam2LastCapture.front().height);
-        ImGui::Text("Saved to: %s/", m_sam2OutputDir.c_str());
-    }
-
-    ImGui::Separator();
-    ImGui::TextDisabled("Preview and SAM2 client come in later milestones.");
-    ImGui::End();
+    drawSam2Panel();
 #endif
     // ─── End ImGui UI ───
 
@@ -532,6 +470,13 @@ void Application::run()
 void Application::cleanup()
 {
     VkDevice device = m_context.device;
+#ifdef RENDER_METHOD_SAM2
+    // The worker touches no Vulkan objects, but it must stop before members are destroyed.
+    m_sam2Job.cancel();
+    m_sam2Job.join();                        // waits for at most the current SAM2 request
+    if (m_sam2HealthFuture.valid())
+        m_sam2HealthFuture.wait();
+#endif
     vkDeviceWaitIdle(device);
 
     m_imguiManager.destroy(device);
@@ -717,6 +662,19 @@ void Application::updateCamera()
     }
 }
 
+void Application::computeCameraMatrices(glm::mat4& view, glm::mat4& proj)
+{
+    const VkExtent2D extent = m_swapchain.getExtent();
+    const float aspect = (float)extent.width / (float)extent.height;
+
+    m_renderer.nearPlane = 0.01f;
+    m_renderer.farPlane  = m_camera.distance * 10.0f;
+
+    view = m_camera.getViewMatrix();
+    proj = glm::perspective(glm::radians(45.0f), aspect,
+                            m_renderer.nearPlane, m_renderer.farPlane);
+}
+
 bool Application::loadTextures()
 {
     if (!m_textureManager.init(m_context))
@@ -767,3 +725,298 @@ void Application::recreateSwapchain()
 
     m_imguiManager.recreate(m_context, m_swapchain);
 }
+#ifdef RENDER_METHOD_SAM2
+// ─────────────────────────────────────────────────────────────────────────────
+// SAM2: capture (main thread, needs Vulkan)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Application::runSam2Capture()
+{
+    if (m_sam2Job.isRunning())
+    {
+        m_sam2Status = "Segmentation running: cancel it or wait before capturing.";
+        return;
+    }
+
+    vkDeviceWaitIdle(m_context.device);   // frames in flight may still use the buffers
+
+    glm::mat4 view, proj;
+    computeCameraMatrices(view, proj);
+    const glm::mat4 viewProj = proj * view;
+
+    try
+    {
+        auto layers = std::make_shared<sam2::LayerSet>(
+            m_renderer.captureSnapshot(m_context, m_vertexBuffer, m_indexBuffer,
+                                       m_scene.getObjects(), viewProj, view, proj));
+
+        size_t nonEmpty = 0;
+        for (const auto& l : *layers)
+            if (!sam2::isLayerEmpty(l)) ++nonEmpty;
+
+        sam2::saveCapturedLayers(*layers, m_sam2OutputDir, /*skipEmpty=*/true);
+
+        m_sam2LastCapture = std::move(layers);   // shared_ptr<LayerSet> -> shared_ptr<const LayerSet>
+        m_sam2Results.clear();
+
+        m_sam2Status = "Captured " + std::to_string(m_sam2LastCapture->size()) + " layers ("
+                     + std::to_string(nonEmpty) + " non-empty).";
+    }
+    catch (const std::exception& e)
+    {
+        m_sam2LastCapture.reset();
+        m_sam2Results.clear();
+        m_sam2Status = std::string("Capture failed: ") + e.what();
+        std::cerr << "[SAM2] " << m_sam2Status << std::endl;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SAM2: start async segmentation (non-blocking, no Vulkan -> safe from ImGui)
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool Application::startSam2Segmentation()
+{
+    if (!m_sam2LastCapture || m_sam2LastCapture->empty())
+    {
+        m_sam2Status = "Nothing to segment: capture first.";
+        return false;
+    }
+    if (m_sam2Job.isRunning())
+        return false;
+
+    sam2::JobConfig cfg;
+    cfg.host                 = m_sam2Host;
+    cfg.port                 = m_sam2Port;
+    cfg.params.pointsPerSide = m_sam2PointsPerSide;
+    cfg.maskDir              = (std::filesystem::path(m_sam2OutputDir) / "masks").string();
+    cfg.saveImages           = m_sam2SaveMaskImages;
+
+    // Pre-fill one "pending" row per layer (ok=false, error empty)
+    const auto& layers = *m_sam2LastCapture;
+    m_sam2Results.assign(layers.size(), sam2::SegmentResult{});
+    for (size_t i = 0; i < layers.size(); ++i)
+    {
+        m_sam2Results[i].layer  = int(i);
+        m_sam2Results[i].width  = layers[i].width;
+        m_sam2Results[i].height = layers[i].height;
+    }
+
+    if (!m_sam2Job.start(m_sam2LastCapture, cfg))
+    {
+        m_sam2Status = "Could not start segmentation job.";
+        return false;
+    }
+    m_sam2JobActive = true;
+    m_sam2Status    = "Segmenting...";
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SAM2: async health check
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Application::startSam2HealthCheck()
+{
+    if (m_sam2HealthPending) return;   // never overwrite an unfinished future (its dtor would block)
+
+    const std::string host = m_sam2Host;   // copies: the lambda must not touch members
+    const int         port = m_sam2Port;
+
+    m_sam2HealthFuture = std::async(std::launch::async, [host, port]()
+    {
+        sam2::Sam2Client client(host, port);
+        std::string info, err;
+        const bool ok = client.health(info, err);
+        return std::make_pair(ok, ok ? info : err);
+    });
+    m_sam2HealthPending = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SAM2: called once per frame on the main thread
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Application::pollSam2Job()
+{
+    // 1) Read the running flag BEFORE taking results: the worker queues every result
+    //    before it clears the flag, so "not running" + takeResults() == everything.
+    const bool running = m_sam2Job.isRunning();
+
+    for (auto& r : m_sam2Job.takeResults())
+        if (r.layer >= 0 && size_t(r.layer) < m_sam2Results.size())
+            m_sam2Results[size_t(r.layer)] = std::move(r);
+
+    if (m_sam2JobActive && !running)
+    {
+        m_sam2JobActive = false;
+        m_sam2Job.join();                         // thread has exited (or is exiting) -> cheap
+        m_sam2Status = m_sam2Job.progress().message;
+    }
+
+    // 2) Health check result
+    if (m_sam2HealthPending && m_sam2HealthFuture.valid() &&
+        m_sam2HealthFuture.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+    {
+        auto [ok, msg] = m_sam2HealthFuture.get();
+        m_sam2HealthPending = false;
+        m_sam2Status = ok ? ("Server OK: " + msg) : ("Server not reachable: " + msg);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SAM2: ImGui panel
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Application::drawSam2Panel()
+{
+    const bool              running = m_sam2Job.isRunning();
+    const sam2::JobProgress prog    = m_sam2Job.progress();
+
+    ImGui::Begin("SAM2 Offline Pipeline");
+
+    ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameTimeMs);
+    ImGui::Text("Resolution: %u x %u | Objects: %u | Textures: %u",
+                m_renderer.getWidth(), m_renderer.getHeight(),
+                (uint32_t)m_scene.getObjects().size(), m_textureManager.getTextureCount());
+    ImGui::Text("Camera dist: %.2f | pitch: %.2f | yaw: %.2f",
+                m_camera.distance, m_camera.pitch, m_camera.yaw);
+    ImGui::Separator();
+
+    // ─── Server settings (locked while a job runs) ───
+    if (ImGui::CollapsingHeader("SAM2 Server", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::BeginDisabled(running);
+
+        char hostBuf[128];
+        std::snprintf(hostBuf, sizeof(hostBuf), "%s", m_sam2Host.c_str());
+        if (ImGui::InputText("Host", hostBuf, sizeof(hostBuf)))
+            m_sam2Host = hostBuf;
+
+        ImGui::InputInt("Port", &m_sam2Port);
+        m_sam2Port = std::clamp(m_sam2Port, 1, 65535);
+
+        ImGui::SliderInt("Points per side", &m_sam2PointsPerSide, 0, 64);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("0 = server default (32).\nLower = faster, coarser masks, less VRAM.");
+
+        ImGui::EndDisabled();
+
+        ImGui::BeginDisabled(m_sam2HealthPending);
+        if (ImGui::Button(m_sam2HealthPending ? "Checking..." : "Check server"))
+            startSam2HealthCheck();
+        ImGui::EndDisabled();
+    }
+
+    // ─── Capture / segment ───
+    if (ImGui::CollapsingHeader("Capture", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::BeginDisabled(running);
+        char dirBuf[256];
+        std::snprintf(dirBuf, sizeof(dirBuf), "%s", m_sam2OutputDir.c_str());
+        if (ImGui::InputText("Output dir", dirBuf, sizeof(dirBuf)))
+            m_sam2OutputDir = dirBuf;
+        ImGui::EndDisabled();
+
+        ImGui::BeginDisabled(running || m_sam2CaptureNow);
+        if (ImGui::Button("Capture layers"))
+            m_sam2CaptureNow = true;
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!m_sam2LastCapture);
+        if (ImGui::Button("Segment last capture"))
+            startSam2Segmentation();
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+
+        ImGui::Checkbox("Auto-segment after capture", &m_sam2AutoSegment);
+        ImGui::Checkbox("Save mask images", &m_sam2SaveMaskImages);
+
+        if (running)
+        {
+            const float frac = prog.total ? float(prog.done) / float(prog.total) : 0.0f;
+            char overlay[128];
+            std::snprintf(overlay, sizeof(overlay), "%u / %u layers  (%.1f s)",
+                          prog.done, prog.total, prog.elapsedSec);
+            ImGui::ProgressBar(frac, ImVec2(-1.0f, 0.0f), overlay);
+
+            if (prog.currentLayer >= 0)
+                ImGui::Text("SAM2 is processing layer %d ...", prog.currentLayer);
+
+            if (ImGui::Button("Cancel"))
+            {
+                m_sam2Job.cancel();
+                m_sam2Status = "Cancelling after the current layer...";
+            }
+        }
+    }
+
+    if (!m_sam2Status.empty())
+    {
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", m_sam2Status.c_str());
+    }
+
+    // ─── Results table ───
+    if (!m_sam2Results.empty())
+    {
+        ImGui::Separator();
+        const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
+                                    | ImGuiTableFlags_SizingFixedFit;
+        if (ImGui::BeginTable("sam2_results", 6, flags))
+        {
+            ImGui::TableSetupColumn("Layer");
+            ImGui::TableSetupColumn("Status");
+            ImGui::TableSetupColumn("Masks");
+            ImGui::TableSetupColumn("SAM2 ms");
+            ImGui::TableSetupColumn("Round trip ms");
+            ImGui::TableSetupColumn("Upload KB");
+            ImGui::TableHeadersRow();
+
+            float    sumInference = 0.0f, sumRoundTrip = 0.0f;
+            uint32_t sumMasks = 0;
+
+            for (const auto& r : m_sam2Results)
+            {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Text("%d", r.layer);
+
+                ImGui::TableSetColumnIndex(1);
+                if (r.skipped)
+                    ImGui::TextDisabled("empty");
+                else if (r.ok)
+                    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "ok");
+                else if (!r.error.empty())
+                {
+                    const bool notProcessed = r.error.rfind("not processed", 0) == 0;
+                    if (notProcessed) ImGui::TextDisabled("not run");
+                    else              ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "error");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", r.error.c_str());
+                }
+                else if (running && prog.currentLayer == r.layer)
+                    ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "running...");
+                else
+                    ImGui::TextDisabled("pending");
+
+                if (r.ok && !r.skipped)
+                {
+                    ImGui::TableSetColumnIndex(2); ImGui::Text("%u",   r.numMasks);
+                    ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f", r.inferenceMs);
+                    ImGui::TableSetColumnIndex(4); ImGui::Text("%.1f", r.roundTripMs);
+                    ImGui::TableSetColumnIndex(5); ImGui::Text("%.1f", r.requestBytes / 1024.0f);
+                    sumMasks     += r.numMasks;
+                    sumInference += r.inferenceMs;
+                    sumRoundTrip += r.roundTripMs;
+                }
+            }
+            ImGui::EndTable();
+
+            ImGui::Text("Total: %u masks | SAM2 %.2f s | round trip %.2f s",
+                        sumMasks, sumInference / 1000.0f, sumRoundTrip / 1000.0f);
+        }
+    }
+
+    ImGui::End();
+}
+#endif // RENDER_METHOD_SAM2
