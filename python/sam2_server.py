@@ -12,6 +12,8 @@ Endpoints
        body = raw PNG bytes
 
 Label map: uint16 per pixel, 0 = no mask, k = mask id k (1-based).
+Sampling: at most points_per_side**2 distinct valid pixels, shared across
+8-connected valid regions. This setting is now a budget, not a full-image grid.
 """
 
 import argparse
@@ -31,7 +33,7 @@ import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
-from PIL import Image
+from PIL import Image, ImageDraw
 from starlette.concurrency import run_in_threadpool
 
 from sam2.build_sam import build_sam2
@@ -72,6 +74,138 @@ def encode_label_png(label: np.ndarray) -> bytes:
     buf = io.BytesIO()
     Image.fromarray(label).save(buf, format="PNG")
     return buf.getvalue()
+
+
+def _valid_component_ids(valid):
+    """8-connected IDs aligned with np.nonzero(valid), using NumPy only.
+
+    Union adjacent row runs instead of visiting every pixel in Python.
+    Components describe fragment coverage, not object identities.
+    """
+    parent, lengths, previous = [], [], []
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for row in valid:
+        edges = np.diff(np.pad(row.astype(np.int8), (1, 1)))
+        starts = np.flatnonzero(edges == 1)
+        stops = np.flatnonzero(edges == -1)
+        current, j = [], 0
+        for start, stop in zip(starts.tolist(), stops.tolist()):
+            run_id = len(parent)
+            parent.append(run_id)
+            lengths.append(stop - start)
+            # Half-open runs can connect diagonally at either endpoint.
+            while j < len(previous) and previous[j][1] < start:
+                j += 1
+            k = j
+            while k < len(previous) and previous[k][0] <= stop:
+                a, b = find(run_id), find(previous[k][2])
+                if a != b:
+                    parent[max(a, b)] = min(a, b)
+                k += 1
+            current.append((start, stop, run_id))
+        previous = current
+
+    roots = np.asarray([find(i) for i in range(len(parent))], dtype=np.int64)
+    _, run_components = np.unique(roots, return_inverse=True)
+    return np.repeat(run_components, np.asarray(lengths, dtype=np.int64))
+
+
+def _spread_points(points_xy, count):
+    """Split a region into spatial bins and pick a valid pixel near each center."""
+    selected, pending = [], [(points_xy, int(count))]
+    while pending:
+        points, n = pending.pop()
+        if n == len(points):
+            selected.append(points)
+        elif n == 1:
+            distance = np.sum((points - points.mean(axis=0)) ** 2, axis=1)
+            selected.append(points[np.argmin(distance)][None, :])
+        else:
+            axis = 0 if np.ptp(points[:, 0]) >= np.ptp(points[:, 1]) else 1
+            ordered = points[np.argsort(points[:, axis], kind="stable")]
+            left_count = n // 2
+            split = len(points) * left_count // n
+            pending.append((ordered[split:], n - left_count))
+            pending.append((ordered[:split], left_count))
+    return np.concatenate(selected, axis=0)
+
+
+def build_valid_point_grid(valid, points_per_side):
+    """Return normalized XY prompts and a reproducible sampling report.
+
+    Reserve one prompt per connected region, then distribute the remainder
+    proportionally to its unused pixels. If regions outnumber the budget,
+    prefer larger regions and report how many received no prompt.
+    """
+    t0 = time.perf_counter()
+    valid = np.asarray(valid, dtype=bool)
+    h, w = valid.shape
+    side = int(points_per_side)
+    if side < 1 or h < 1 or w < 1:
+        raise ValueError("Sampling requires a nonempty image and positive point budget")
+    budget = side * side
+    ys, xs = np.nonzero(valid)
+    available = np.column_stack((xs, ys))
+    count = min(budget, len(available))
+    component_ids = _valid_component_ids(valid)
+    sizes = np.bincount(component_ids)
+    quotas = np.zeros(len(sizes), dtype=np.int64)
+
+    if count and len(sizes) > count:
+        quotas[np.argsort(-sizes, kind="stable")[:count]] = 1
+    elif count:
+        quotas[:] = 1
+        remaining = count - len(sizes)
+        if remaining:
+            capacity = sizes - 1
+            extra, remainder = np.divmod(remaining * capacity, capacity.sum())
+            quotas += extra
+            leftover = int(count - quotas.sum())
+            quotas[np.argsort(-remainder, kind="stable")[:leftover]] += 1
+
+    offset = 1.0 / (2 * side)
+    old_axis = np.linspace(offset, 1.0 - offset, side)
+    old_x = np.minimum((old_axis * w).astype(np.int64), w - 1)
+    old_y = np.minimum((old_axis * h).astype(np.int64), h - 1)
+    if len(available) == h * w and side <= min(h, w):
+        # A fully valid image already permits a cheap, well-spread regular grid.
+        grid_x, grid_y = np.meshgrid(old_x, old_y)
+        selected = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+    elif count == len(available):
+        selected = available  # Includes the empty-image case; no duplicates.
+    else:
+        order = np.argsort(component_ids, kind="stable")
+        grouped = available[order]
+        offsets = np.concatenate(([0], np.cumsum(sizes)))
+        selected = np.concatenate([
+            _spread_points(grouped[offsets[i]:offsets[i + 1]], quotas[i])
+            for i in np.flatnonzero(quotas)
+        ], axis=0)
+
+    # XY order, pixel centers, normalized to the original image dimensions.
+    points = (selected.astype(np.float32) + 0.5) / np.array([w, h], np.float32)
+    report = {
+        "strategy": "valid_components_spatial",
+        "connectivity": 8,
+        "point_budget": budget,
+        "num_points": int(len(points)),
+        "valid_pixels": int(len(available)),
+        "components_total": int(len(sizes)),
+        "components_prompted": int(np.count_nonzero(quotas)),
+        "components_without_prompt": int(np.count_nonzero(quotas == 0)),
+        "old_grid_points_on_valid": int(valid[np.ix_(old_y, old_x)].sum()),
+        "points_outside_valid": int(np.count_nonzero(~valid[selected[:, 1], selected[:, 0]])),
+        "points_xy": selected.tolist(),
+        "coordinate_convention": "Zero-based pixel indices; SAM2 uses (x+0.5)/width, (y+0.5)/height.",
+        "sampling_ms": (time.perf_counter() - t0) * 1000.0,
+    }
+    return np.ascontiguousarray(points), report
 
 
 def build_label_map(raw_masks, valid, min_area, min_valid_ratio, diagnostics=None):
@@ -189,6 +323,12 @@ def save_diagnostics(root, rgb, valid, label, raw_masks, meta, diagnostics,
     Image.fromarray(valid.astype(np.uint8) * 255).save(request_dir / "valid.png")
     Image.fromarray(label).save(request_dir / "labels.png")
     Image.fromarray(make_overlay(rgb, label)).save(request_dir / "overlay.png")
+    prompts = Image.fromarray(rgb)
+    draw = ImageDraw.Draw(prompts)
+    for x, y in diagnostics["sampling"]["points_xy"]:
+        draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(0, 255, 255), outline=(0, 0, 0))
+        draw.point((x, y), fill=(255, 255, 0))
+    prompts.save(request_dir / "prompts.png")
     for proposal_id, m in enumerate(raw_masks, start=1):
         mask = np.asarray(m["segmentation"], dtype=np.uint8) * 255
         Image.fromarray(mask).save(masks_dir / f"proposal_{proposal_id:06d}.png")
@@ -201,6 +341,7 @@ def save_diagnostics(root, rgb, valid, label, raw_masks, meta, diagnostics,
         "params": params,
         "filters": {"min_area": min_area, "min_valid_ratio": min_valid_ratio},
         "timing_ms": {"inference": inference_ms,
+                      "sampling": diagnostics["sampling"]["sampling_ms"],
                       "processing_before_debug_io": processing_ms},
         "notes": [
             "Generator proposals are AFTER SAM2's internal filtering/NMS.",
@@ -208,6 +349,8 @@ def save_diagnostics(root, rgb, valid, label, raw_masks, meta, diagnostics,
             "The label map keeps the original largest-first, small-masks-on-top policy.",
             "proposal_id identifies a generator_masks PNG; label_id is the returned ID.",
             "HTTP total time includes diagnostic writes; inference time does not.",
+            "prompts.png marks sampled pixel centers in yellow; cyan markers extend beyond them.",
+            "Connected valid regions are sampling regions, not object identities.",
         ],
         **diagnostics,
         "returned_mask_metadata": meta,
@@ -267,19 +410,24 @@ class Sam2Service:
 
     # ---- internals (call with self.lock held) -------------------------------
 
-    def _get_generator(self, params):
+    def _get_generator(self, params, point_grid):
         key = (params["points_per_side"], params["pred_iou_thresh"],
                params["stability_score_thresh"])
         gen = self._generators.get(key)
         if gen is None:
             gen = SAM2AutomaticMaskGenerator(
                 self.model,
-                points_per_side=key[0],
+                points_per_side=None,
+                point_grids=[point_grid],
+                crop_n_layers=0,       # This grid uses the full image coordinates.
                 pred_iou_thresh=key[1],
                 stability_score_thresh=key[2],
                 output_mode="binary_mask",
             )
             self._generators[key] = gen
+        # Cached generators must receive THIS request's validity-based prompts.
+        # Updating the grid and generating masks both happen under self.lock.
+        gen.point_grids = [point_grid]
         return gen
 
     def _autocast(self):
@@ -287,8 +435,8 @@ class Sam2Service:
             return torch.autocast("cuda", dtype=torch.bfloat16)
         return contextlib.nullcontext()
 
-    def _generate(self, rgb, params):
-        gen = self._get_generator(params)
+    def _generate(self, rgb, params, point_grid):
+        gen = self._get_generator(params, point_grid)
         if self.is_cuda:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -309,12 +457,14 @@ class Sam2Service:
         img = np.stack(np.meshgrid(x, y), axis=-1)
         img = np.concatenate([img, np.full((height, width, 1), 128, np.float32)], axis=-1)
         img = img.astype(np.uint8)
+        point_grid, _ = build_valid_point_grid(
+            np.ones((height, width), dtype=bool), self.defaults["points_per_side"])
 
         print(f"[sam2] Warm-up: {runs} run(s) at {width}x{height} ...")
         times = []
         with self.lock:
             for _ in range(runs):
-                _, ms = self._generate(img, self.defaults)
+                _, ms = self._generate(img, self.defaults, point_grid)
                 times.append(ms)
         self.warmup_info = {"size": [width, height], "runs_ms": [round(t, 1) for t in times]}
         print(f"[sam2] Warm-up done: {', '.join(f'{t:.0f} ms' for t in times)}")
@@ -323,12 +473,13 @@ class Sam2Service:
         t_total = time.perf_counter()
         h, w = valid.shape
 
+        point_grid, sampling = build_valid_point_grid(valid, params["points_per_side"])
         raw, inference_ms = [], 0.0
-        if valid.any():                # empty requests still get diagnostics
+        if len(point_grid):            # Empty grids must not reach SAM2.
             with self.lock:
-                raw, inference_ms = self._generate(rgb, params)
+                raw, inference_ms = self._generate(rgb, params, point_grid)
 
-        diagnostics = {}
+        diagnostics = {"sampling": sampling}
         label, meta = build_label_map(raw, valid, self.min_area,
                                      self.min_valid_ratio, diagnostics)
 
@@ -347,6 +498,9 @@ class Sam2Service:
         coverage = (f"{100 * c['valid_coverage']:.1f}%"
                     if c["valid_coverage"] is not None else "n/a (empty layer)")
         print(f"[sam2] layer={layer:>3}  {w}x{h}  valid={valid.mean() * 100:5.1f}%  "
+              f"prompts={sampling['num_points']}  "
+              f"old_grid_valid={sampling['old_grid_points_on_valid']}  "
+              f"regions={sampling['components_prompted']}/{sampling['components_total']}  "
               f"generator={len(raw)}  rejected_area={c['rejected_min_area']}  "
               f"rejected_ratio={c['rejected_valid_ratio']}  "
               f"kept={len(meta)}  overwritten={c['fully_overwritten']}  "
@@ -453,7 +607,8 @@ def main():
     p.add_argument("--apply-postprocessing", action="store_true",
                    help="build_sam2 default (your old test script); "
                         "the official AMG notebook uses False")
-    p.add_argument("--points-per-side", type=int, default=32)
+    p.add_argument("--points-per-side", type=int, default=32,
+                   help="Prompt budget is N*N, sampled only inside valid pixels (default: 1024)")
     p.add_argument("--pred-iou-thresh", type=float, default=0.8)
     p.add_argument("--stability-score-thresh", type=float, default=0.90)
     p.add_argument("--min-area", type=int, default=64,
@@ -465,7 +620,7 @@ def main():
     p.add_argument("--warmup-runs", type=int, default=2)
     p.add_argument("--debug-dir", default="",
                    help="If set: saves RGB, validity, individual generator masks, labels, "
-                        "overlays and reports in unique run/request subdirectories")
+                        "overlays, prompt locations and reports in unique run/request subdirectories")
     args = p.parse_args()
 
     SERVICE = Sam2Service(args)
