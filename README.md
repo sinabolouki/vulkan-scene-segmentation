@@ -1,6 +1,6 @@
 # Real-time Screen-space Object Detection using Per-pixel Fragment List
 
-Research renderer developed for a master's thesis at the Technical University of Munich (TUM). The project investigates screen-space object segmentation using **per-pixel linked lists (PPLL)** and **union-find**.
+Research renderer developed for a master's thesis at the Technical University of Munich (TUM). The project investigates screen-space object segmentation using **per-pixel linked lists (PPLL)**, **union-find**, and an optional **SAM2** segmentation pipeline.
 
 - **Author:** Sina Bolouki
 - **Supervisor:** Prof. R. Westermann
@@ -29,6 +29,37 @@ Union-find maintains groups through two operations:
 Elements with the same final representative belong to the same connected component. The connectivity criteria determine the segmentation; union-find efficiently maintains the resulting groups.
 
 A connected component is a region produced by those criteria. Its correspondence to a complete physical object is part of the segmentation problem.
+
+## Renderer selection
+
+Select the renderer when configuring CMake using the **`THESIS_RENDERER`** setting. The default is **`UNION_FIND`**.
+
+| Value | Purpose |
+| --- | --- |
+| `SIMPLE` | Basic forward renderer for testing scene rendering. |
+| `DEPTH_PEELING` | Depth-peeling implementation. |
+| `PPLL` | Per-pixel linked-list implementation. |
+| `UNION_FIND` | PPLL with union-find grouping; the default renderer. |
+| `SAM2` | Capture ordered PPLL depth layers and send their images to a separate SAM2 server for segmentation. |
+
+Choose exactly one value, using the uppercase spelling shown above. Unsupported values cause CMake configuration to fail.
+
+Renderer selection is a **build setting**. After changing it, configure CMake again and rebuild the application. No renderer-selection macros need to be edited in `src/application.h`.
+
+- **Command line:** pass `-DTHESIS_RENDERER=<value>` to the CMake configure command, as shown in [Build on Windows](#build-on-windows).
+- **VS Code:** set `THESIS_RENDERER` inside `cmake.configureSettings`, then use **Configure → Build**, as shown in [Build with VS Code](#build-with-vs-code).
+
+The setting selects the renderer used by the application and its associated controls. The current CMake build still compiles all renderer source files and shaders.
+
+### SAM2 mode
+
+SAM2 segmentation additionally requires a separately running Python SAM2 server with its model installed. Start the server before requesting segmentation. The other renderer modes do not require a running SAM2 server.
+
+In the application's **SAM2 Offline Pipeline** panel:
+
+1. Set the server **Host** and **Port** under **SAM2 Server**. The defaults are `127.0.0.1` and `8765`.
+2. Click **Check server** to verify the connection.
+3. Click **Capture layers** to capture the current view. With **Auto-segment after capture** enabled, segmentation starts automatically; otherwise click **Segment last capture** afterward.
 
 ## Requirements
 
@@ -121,10 +152,13 @@ cmake -S . -B build `
     "-DCMAKE_TOOLCHAIN_FILE=$vcpkgPath/scripts/buildsystems/vcpkg.cmake" `
     -DVCPKG_TARGET_TRIPLET=x64-windows `
     "-DVulkan_INCLUDE_DIR=$vulkanSdkPath/Include" `
-    "-DVulkan_LIBRARY=$vulkanSdkPath/Lib/vulkan-1.lib"
+    "-DVulkan_LIBRARY=$vulkanSdkPath/Lib/vulkan-1.lib" `
+    -DTHESIS_RENDERER=UNION_FIND
 ```
 
-CMake discovers the installed libraries through the vcpkg toolchain file and configures the renderer, shader compilation, and asset-copy targets.
+CMake discovers the installed libraries through the vcpkg toolchain file and configures the selected renderer, shader compilation, and asset-copy targets.
+
+The example explicitly selects `UNION_FIND`. Replace it with another value from [Renderer selection](#renderer-selection), such as `SAM2`. If the setting has never been configured in this build directory, omitting it uses the `UNION_FIND` default. Once configured, CMake retains the selected value in the build directory's cache; pass the new value when switching renderers.
 
 The command above explicitly chooses the Visual Studio 2022 generator and a 64-bit build. The supplied VS Code settings do not choose a generator or compiler.
 
@@ -157,7 +191,8 @@ For repository-local configuration, use `.vscode/settings.json` with the supplie
     "CMAKE_CXX_STANDARD": "20",
     "CMAKE_CXX_STANDARD_REQUIRED": "ON",
     "Vulkan_INCLUDE_DIR": "C:/VulkanSDK/1.4.357.0/Include",
-    "Vulkan_LIBRARY": "C:/VulkanSDK/1.4.357.0/Lib/vulkan-1.lib"
+    "Vulkan_LIBRARY": "C:/VulkanSDK/1.4.357.0/Lib/vulkan-1.lib",
+    "THESIS_RENDERER": "UNION_FIND"
   }
 }
 ```
@@ -168,8 +203,16 @@ For CMake Tools' kit-based workflow, use the Command Palette:
 
 1. **CMake: Select a Kit** — select an installed compiler targeting 64-bit Windows.
 2. **CMake: Select Variant** — choose `Release` for performance measurements or `Debug` for debugging.
-3. **CMake: Configure** — configure the project with the selected compiler and settings.
+3. **CMake: Configure** — configure the project with the selected compiler, renderer, and settings.
 4. **CMake: Build** — build the renderer, shaders, and copied assets.
+
+To switch renderers, change only the `THESIS_RENDERER` value in `.vscode/settings.json`. For example:
+
+```json
+"THESIS_RENDERER": "SAM2"
+```
+
+Save the file, run **CMake: Configure**, and then run **CMake: Build**. The normal VS Code Configure and Build buttons can be used for these steps. Reconfiguration applies the renderer setting, and rebuilding updates the executable; a normal renderer switch does not require deleting the CMake cache.
 
 The supplied settings do not specify a generator, build directory, or launch working directory. CMake Tools' default build directory is `${workspaceFolder}/build`, but other settings or presets can select another directory. Check the CMake output for the actual generator and build location.
 
@@ -200,7 +243,7 @@ The `Release/` and `Debug/` executable directories above are specific to the Vis
 
 | Path | Contents |
 | --- | --- |
-| `CMakeLists.txt` | Project configuration, library discovery, shader compilation, and asset copying. |
+| `CMakeLists.txt` | Project configuration, renderer selection, library discovery, shader compilation, and asset copying. |
 | `.vscode/settings.json` | Repository-local VS Code CMake Tools configuration, when the supplied settings are placed here. |
 | `src/` | C++ source and header files collected recursively by CMake. |
 | `shaders/` | GLSL vertex, fragment, and compute shaders. |
@@ -233,6 +276,9 @@ After editing an existing shader, rebuild normally. After adding a new shader or
 | The application cannot locate shaders or assets | Set the working directory to `build/` and confirm the build completed its shader and asset targets. |
 | CMake reports a generator or toolchain mismatch | Configure into a new build directory when changing generators, compilers, or dependency triplets. |
 | A newly added source or shader is not built | Rerun CMake configuration so its recursive file searches include the new file. |
+| CMake rejects the renderer value | Use exactly one of `SIMPLE`, `DEPTH_PEELING`, `PPLL`, `UNION_FIND`, or `SAM2` for `THESIS_RENDERER`. |
+| The application still uses the previous renderer | Save the new `THESIS_RENDERER` value, configure CMake again, and rebuild the executable you are launching. In VS Code, use **CMake: Configure**, then **CMake: Build**. |
+| SAM2 reports that the server is not reachable | Start the separate SAM2 server, check its host and port against the **SAM2 Server** panel, and click **Check server**. |
 
 ## Research considerations
 
