@@ -6,13 +6,6 @@
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #endif
 
-// CHOOSE RENDERING METHOD (uncomment ONE):
-// #define RENDER_METHOD_PPLL              // Per-Pixel Linked List
-// #define RENDER_METHOD_DEPTH_PEELING     // Depth Peeling
-#define RENDER_METHOD_UNION_FIND        // Union-Find PPLL
-// #define RENDER_METHOD_SIMPLE            // Simple forward (for testing)
-// #define RENDER_METHOD_SAM2
-
 #include "vulkan_context.h"
 #include "swapchain_manager.h"
 #include "scene.h"
@@ -34,7 +27,7 @@
 #include <future>
 #include <memory>
 #else
-#error "No render method defined! Uncomment one in application.h"
+#error "No renderer selected. Configure using -DTHESIS_RENDERER=<name>."
 #endif
 
 #include <GLFW/glfw3.h>

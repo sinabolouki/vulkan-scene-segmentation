@@ -16,6 +16,31 @@ add_subdirectory(vk-bootstrap)
 file(GLOB_RECURSE SOURCES src/*.cpp src/*.h)
 add_executable(${PROJECT_NAME} ${SOURCES})
 
+set(THESIS_RENDERER "UNION_FIND" CACHE STRING "Renderer to use")
+
+set(SUPPORTED_RENDERERS
+    SIMPLE
+    DEPTH_PEELING
+    PPLL
+    UNION_FIND
+    SAM2
+)
+
+set_property(CACHE THESIS_RENDERER PROPERTY STRINGS
+    ${SUPPORTED_RENDERERS}
+)
+
+if(NOT THESIS_RENDERER IN_LIST SUPPORTED_RENDERERS)
+    message(FATAL_ERROR
+        "Unknown renderer '${THESIS_RENDERER}'. "
+        "Choose one of: ${SUPPORTED_RENDERERS}"
+    )
+endif()
+
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    RENDER_METHOD_${THESIS_RENDERER}
+)
+
 target_include_directories(${PROJECT_NAME} PRIVATE
     src/
     external/
@@ -75,3 +100,4 @@ add_custom_target(copy_assets ALL
 )
 
 add_dependencies(${PROJECT_NAME} copy_assets)
+
