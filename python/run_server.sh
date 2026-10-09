@@ -15,4 +15,6 @@ python sam2_server.py \
     --host 0.0.0.0 --port 8765 \
     --warmup-size 1280x720 --warmup-runs 2 \
     --debug-dir debug_out \
+    --model "large" \
+    --points-per-batch 128 \
     "$@"

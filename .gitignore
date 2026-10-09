@@ -245,3 +245,6 @@ libs/vulkan/*.so
 __pycache__**
 
 renderdoc_config/
+
+python/debug_out/
+python/inspect_out/

@@ -8,12 +8,14 @@ as an RGBA PNG; alpha == 0 marks pixels without a fragment in that layer.
 Endpoints
   GET  /health
   POST /segment?layer=N&format=json|png
-                [&points_per_side=..&pred_iou_thresh=..&stability_score_thresh=..]
+                [&points_per_side=..&points_per_batch=..]
+                [&pred_iou_thresh=..&stability_score_thresh=..]
        body = raw PNG bytes
 
 Label map: uint16 per pixel, 0 = no mask, k = mask id k (1-based).
 Sampling: at most points_per_side**2 distinct valid pixels, shared across
 8-connected valid regions. This setting is now a budget, not a full-image grid.
+Batching: points_per_batch controls how many prompts SAM2 processes at once.
 """
 
 import argparse
@@ -294,14 +296,20 @@ def build_label_map(raw_masks, valid, min_area, min_valid_ratio, diagnostics=Non
     return label, meta
 
 
-def make_overlay(rgb, label, alpha=0.45):
+def make_mask_image(label):
+    """Color the final masks on black; label 0 is the unlabeled background."""
     n = int(label.max())
     rng = np.random.default_rng(0)
     colors = rng.integers(0, 256, size=(n + 1, 3), dtype=np.uint8)
     colors[0] = 0
+    return colors[label]
+
+
+def make_overlay(rgb, label, alpha=0.45):
+    mask_image = make_mask_image(label)
     out = rgb.astype(np.float32)
     mask = label > 0
-    out[mask] = (1 - alpha) * out[mask] + alpha * colors[label[mask]].astype(np.float32)
+    out[mask] = (1 - alpha) * out[mask] + alpha * mask_image[mask].astype(np.float32)
     return out.clip(0, 255).astype(np.uint8)
 
 
@@ -322,6 +330,7 @@ def save_diagnostics(root, rgb, valid, label, raw_masks, meta, diagnostics,
     Image.fromarray(rgb).save(request_dir / "input_rgb.png")
     Image.fromarray(valid.astype(np.uint8) * 255).save(request_dir / "valid.png")
     Image.fromarray(label).save(request_dir / "labels.png")
+    Image.fromarray(make_mask_image(label)).save(request_dir / "masks.png")
     Image.fromarray(make_overlay(rgb, label)).save(request_dir / "overlay.png")
     prompts = Image.fromarray(rgb)
     draw = ImageDraw.Draw(prompts)
@@ -347,6 +356,7 @@ def save_diagnostics(root, rgb, valid, label, raw_masks, meta, diagnostics,
             "Generator proposals are AFTER SAM2's internal filtering/NMS.",
             "Rejection counts use the first failed condition: area, then valid ratio.",
             "The label map keeps the original largest-first, small-masks-on-top policy.",
+            "masks.png shows the final labels in the overlay's colors on a black background.",
             "proposal_id identifies a generator_masks PNG; label_id is the returned ID.",
             "HTTP total time includes diagnostic writes; inference time does not.",
             "prompts.png marks sampled pixel centers in yellow; cyan markers extend beyond them.",
@@ -389,9 +399,11 @@ class Sam2Service:
 
         self.defaults = {
             "points_per_side": args.points_per_side,
+            "points_per_batch": args.points_per_batch,
             "pred_iou_thresh": args.pred_iou_thresh,
             "stability_score_thresh": args.stability_score_thresh,
         }
+        print(f"[sam2] Prompt batch size: {args.points_per_batch}")
         self.min_area = args.min_area
         self.min_valid_ratio = args.min_valid_ratio
 
@@ -412,12 +424,13 @@ class Sam2Service:
 
     def _get_generator(self, params, point_grid):
         key = (params["points_per_side"], params["pred_iou_thresh"],
-               params["stability_score_thresh"])
+               params["stability_score_thresh"], params["points_per_batch"])
         gen = self._generators.get(key)
         if gen is None:
             gen = SAM2AutomaticMaskGenerator(
                 self.model,
                 points_per_side=None,
+                points_per_batch=key[3],
                 point_grids=[point_grid],
                 crop_n_layers=0,       # This grid uses the full image coordinates.
                 pred_iou_thresh=key[1],
@@ -499,6 +512,7 @@ class Sam2Service:
                     if c["valid_coverage"] is not None else "n/a (empty layer)")
         print(f"[sam2] layer={layer:>3}  {w}x{h}  valid={valid.mean() * 100:5.1f}%  "
               f"prompts={sampling['num_points']}  "
+              f"batch_size={params['points_per_batch']}  "
               f"old_grid_valid={sampling['old_grid_points_on_valid']}  "
               f"regions={sampling['components_prompted']}/{sampling['components_total']}  "
               f"generator={len(raw)}  rejected_area={c['rejected_min_area']}  "
@@ -538,6 +552,7 @@ async def segment(
     layer: int = Query(-1),
     format: str = Query("json"),
     points_per_side: Optional[int] = Query(None, ge=4, le=128),
+    points_per_batch: Optional[int] = Query(None, ge=1),
     pred_iou_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
     stability_score_thresh: Optional[float] = Query(None, ge=0.0, le=1.0),
 ):
@@ -552,6 +567,7 @@ async def segment(
 
     params = dict(SERVICE.defaults)
     if points_per_side is not None:        params["points_per_side"] = points_per_side
+    if points_per_batch is not None:       params["points_per_batch"] = points_per_batch
     if pred_iou_thresh is not None:        params["pred_iou_thresh"] = pred_iou_thresh
     if stability_score_thresh is not None: params["stability_score_thresh"] = stability_score_thresh
 
@@ -609,6 +625,9 @@ def main():
                         "the official AMG notebook uses False")
     p.add_argument("--points-per-side", type=int, default=32,
                    help="Prompt budget is N*N, sampled only inside valid pixels (default: 1024)")
+    p.add_argument("--points-per-batch", type=int, default=64,
+                   help="Prompts processed at once (default: 64); "
+                        "higher values may be faster but use more GPU memory")
     p.add_argument("--pred-iou-thresh", type=float, default=0.8)
     p.add_argument("--stability-score-thresh", type=float, default=0.90)
     p.add_argument("--min-area", type=int, default=64,
@@ -620,8 +639,10 @@ def main():
     p.add_argument("--warmup-runs", type=int, default=2)
     p.add_argument("--debug-dir", default="",
                    help="If set: saves RGB, validity, individual generator masks, labels, "
-                        "overlays, prompt locations and reports in unique run/request subdirectories")
+                        "colored masks, overlays, prompt locations and reports in unique run/request subdirectories")
     args = p.parse_args()
+    if args.points_per_batch < 1:
+        p.error("--points-per-batch must be at least 1")
 
     SERVICE = Sam2Service(args)
     SERVICE.warmup(*parse_size(args.warmup_size), args.warmup_runs)
