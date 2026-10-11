@@ -7,9 +7,17 @@ Research renderer developed for a master's thesis at the Technical University of
 - **Implementation:** C++20 and Vulkan
 - **CMake project / executable:** `DepthPeelingRenderer`
 
-## Example result
+## Example results
 
-The same room before and after union-find segmentation. The colors in the result mark connected regions produced by the current connectivity criteria.
+Original rendered views compared with union-find segmentation. The colors in the results mark connected regions produced by the current connectivity criteria.
+
+### Sponza
+
+| Original scene | Union-find segmentation |
+| :---: | :---: |
+| ![Original rendered Sponza scene](results/images/sponza_orig.png) | ![Sponza with union-find segmentation overlay](results/images/sponza_ours.png) |
+
+### Room
 
 | Original scene | Union-find segmentation |
 | :---: | :---: |
@@ -228,7 +236,7 @@ For the Visual Studio command-line build above, launch the application with **`b
 
 ```powershell
 Push-Location .\build
-.\Release\DepthPeelingRenderer.exe
+.\Release\DepthPeelingRenderer.exe --scene "assets/sponza/sponza.obj"
 Pop-Location
 ```
 
@@ -237,7 +245,7 @@ For a Debug build, run these commands from the repository root:
 ```powershell
 cmake --build build --config Debug --parallel
 Push-Location .\build
-.\Debug\DepthPeelingRenderer.exe
+.\Debug\DepthPeelingRenderer.exe --scene "assets/sponza/sponza.obj"
 Pop-Location
 ```
 
@@ -247,7 +255,9 @@ The `Release/` and `Debug/` executable directories above are specific to the Vis
 
 ### Choose a scene
 
-Select an OBJ file at startup with `--scene`. Changing scenes does not require reconfiguring CMake or rebuilding the executable.
+The repository includes the Sponza OBJ and its supporting files under `assets/sponza/`. CMake copies them into `build/assets/sponza/`; the launch commands above select this bundled scene with `--scene`.
+
+Select another OBJ file at startup with `--scene`. Changing scenes does not require reconfiguring CMake or rebuilding the executable.
 
 ```powershell
 Push-Location .\build
@@ -257,9 +267,7 @@ Pop-Location
 
 Absolute paths can point to scenes outside the repository. Relative paths are resolved from the **working directory**, so `--scene "assets/office/model.obj"` refers to `build/assets/office/model.obj` when running from `build/`. Keep the referenced `.mtl` and texture files available beside the OBJ, including any relative subdirectories used by the material files. The existing scene loader resolves those files from the OBJ's directory.
 
-Without `--scene`, the application uses `assets/simple_room/simple_room.obj`. This OBJ is currently not tracked in the repository. Supply your own scene with `--scene`, or place an OBJ and its supporting files at the default location under the source `assets/` directory and build to copy them into `build/assets/`.
-
-The `.gitignore` rule `*.obj` also ignores OBJ scene meshes. To commit scene meshes under `assets/`, add the exception `!assets/**/*.obj` to `.gitignore`.
+Without `--scene`, the application currently uses `assets/simple_room/simple_room.obj`. This OBJ is not tracked in the repository. Pass `--scene "assets/sponza/sponza.obj"` to use the bundled scene, or supply a path to another local OBJ.
 
 The application checks that the selected file exists before creating the window or initializing Vulkan, and reports its absolute path if the check fails. To see the available startup options:
 
@@ -274,11 +282,11 @@ For **CMake: Debug**, add `cmake.debugConfig` alongside your existing `cmake.con
 ```json
 "cmake.debugConfig": {
   "cwd": "${workspaceFolder}/build",
-  "args": ["--scene", "C:/Scenes/room/model.obj"]
+  "args": ["--scene", "assets/sponza/sponza.obj"]
 }
 ```
 
-Replace the OBJ path with your scene, and adjust `cwd` if your CMake build directory is elsewhere. Use the build directory containing `shaders/`, including for Visual Studio builds whose executable is inside `Debug/` or `Release/`. Run **CMake: Debug** after building. To switch scenes later, edit only the path in `args` and restart the application.
+This example selects the bundled Sponza scene. Replace the OBJ path to select another scene, and adjust `cwd` if your CMake build directory is elsewhere. Use the build directory containing `shaders/`, including for Visual Studio builds whose executable is inside `Debug/` or `Release/`. Run **CMake: Debug** after building. To switch scenes later, edit only the path in `args` and restart the application.
 
 ## Repository and build layout
 
