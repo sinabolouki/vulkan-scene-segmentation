@@ -7,6 +7,14 @@ Research renderer developed for a master's thesis at the Technical University of
 - **Implementation:** C++20 and Vulkan
 - **CMake project / executable:** `DepthPeelingRenderer`
 
+## Example result
+
+The same room before and after union-find segmentation. The colors in the result mark connected regions produced by the current connectivity criteria.
+
+| Original scene | Union-find segmentation |
+| :---: | :---: |
+| ![Original rendered room](results/images/room2_orig.png) | ![Room with union-find segmentation overlay](results/images/room2_ours.png) |
+
 ## Overview
 
 A conventional image retains the visible surface at each pixel. A per-pixel linked list can retain multiple fragments along the same viewing ray, including fragments behind the frontmost surface. This provides a layered screen-space representation for investigating segmentation beyond the visible image.
@@ -73,8 +81,6 @@ The build instructions below target **64-bit Windows with vcpkg**.
 | Vulkan SDK | Must provide Vulkan headers, libraries, and `glslangValidator` for shader compilation. |
 | GPU and driver | Vulkan support compatible with the renderer's runtime requirements. |
 | vcpkg | Used to install the libraries listed below. |
-
-> The current `CMakeLists.txt` declares CMake 3.20, but its shader commands use `Vulkan::glslangValidator`. CMake introduced this imported target in version 3.21, so use CMake 3.21 or newer.
 
 ### Dependencies
 
