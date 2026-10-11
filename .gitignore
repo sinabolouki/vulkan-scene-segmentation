@@ -248,3 +248,8 @@ renderdoc_config/
 
 python/debug_out/
 python/inspect_out/
+
+# Only track Sponza under assets/
+/assets/*
+!/assets/Sponza/
+!/assets/Sponza/**/*.obj

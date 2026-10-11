@@ -24,7 +24,8 @@ void Application::framebufferResizeCallback(GLFWwindow *window, int width, int h
 // Init
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool Application::init(uint32_t width, uint32_t height, const std::string &title)
+bool Application::init(uint32_t width, uint32_t height, const std::string &title,
+                       const std::string &scenePath)
 {
     m_width = width;
     m_height = height;
@@ -51,11 +52,6 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
         return false;
 
     // Scene
-    // std::string scenePath = "../assets/circles16.obj";
-    // std::string scenePath = "../assets/simple_scene.obj";
-    // std::string scenePath = "assets/sponza/sponza.obj";
-    std::string scenePath = "assets/simple_room/simple_room.obj";
-    // std::string scenePath = "assets/office/model.obj";
     if (!m_scene.loadFromOBJ(scenePath))
     {
         std::cerr << "Failed to load scene: " << scenePath << std::endl;

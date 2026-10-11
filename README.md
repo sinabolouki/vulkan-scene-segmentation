@@ -241,9 +241,44 @@ Push-Location .\build
 Pop-Location
 ```
 
-When launching through an IDE, set the working directory to the actual CMake build directory, which contains `shaders/` and `assets/`. The supplied `settings.json` configures the build but does not set the launch working directory. Use a Release build for performance measurements.
+When launching through an IDE, set the working directory to the actual CMake build directory, which contains `shaders/` and `assets/`. The configure settings above do not set the launch working directory; the VS Code example below adds it for debugging. Use a Release build for performance measurements.
 
 The `Release/` and `Debug/` executable directories above are specific to the Visual Studio generator. Single-configuration generators such as Ninja normally place the executable directly in the build directory.
+
+### Choose a scene
+
+Select an OBJ file at startup with `--scene`. Changing scenes does not require reconfiguring CMake or rebuilding the executable.
+
+```powershell
+Push-Location .\build
+.\Release\DepthPeelingRenderer.exe --scene "C:/Scenes/room/model.obj"
+Pop-Location
+```
+
+Absolute paths can point to scenes outside the repository. Relative paths are resolved from the **working directory**, so `--scene "assets/office/model.obj"` refers to `build/assets/office/model.obj` when running from `build/`. Keep the referenced `.mtl` and texture files available beside the OBJ, including any relative subdirectories used by the material files. The existing scene loader resolves those files from the OBJ's directory.
+
+Without `--scene`, the application uses `assets/simple_room/simple_room.obj`. This OBJ is currently not tracked in the repository. Supply your own scene with `--scene`, or place an OBJ and its supporting files at the default location under the source `assets/` directory and build to copy them into `build/assets/`.
+
+The `.gitignore` rule `*.obj` also ignores OBJ scene meshes. To commit scene meshes under `assets/`, add the exception `!assets/**/*.obj` to `.gitignore`.
+
+The application checks that the selected file exists before creating the window or initializing Vulkan, and reports its absolute path if the check fails. To see the available startup options:
+
+```powershell
+.\build\Release\DepthPeelingRenderer.exe --help
+```
+
+### Scene arguments in VS Code
+
+For **CMake: Debug**, add `cmake.debugConfig` alongside your existing `cmake.configureSettings` in `.vscode/settings.json`:
+
+```json
+"cmake.debugConfig": {
+  "cwd": "${workspaceFolder}/build",
+  "args": ["--scene", "C:/Scenes/room/model.obj"]
+}
+```
+
+Replace the OBJ path with your scene, and adjust `cwd` if your CMake build directory is elsewhere. Use the build directory containing `shaders/`, including for Visual Studio builds whose executable is inside `Debug/` or `Release/`. Run **CMake: Debug** after building. To switch scenes later, edit only the path in `args` and restart the application.
 
 ## Repository and build layout
 
@@ -279,6 +314,7 @@ After editing an existing shader, rebuild normally. After adding a new shader or
 | Vulkan or `Vulkan::glslangValidator` cannot be found | Verify the Vulkan SDK installation, use CMake 3.21 or newer, and configure again from a terminal with the SDK environment available. |
 | The Vulkan SDK was upgraded or moved | Update `Vulkan_INCLUDE_DIR` and `Vulkan_LIBRARY` in the VS Code settings or terminal configure arguments; check the shader compiler path as well. |
 | GLFW or Vulkan ImGui backend symbols are unresolved | Confirm ImGui was installed with the `glfw-binding` and `vulkan-binding` features. |
+| The application reports that the scene file is missing or not a regular file | Pass `--scene "path/to/scene.obj"`. Relative paths start at the launch working directory; use an absolute path to remove ambiguity. The default OBJ is not tracked in the repository. |
 | The application cannot locate shaders or assets | Set the working directory to `build/` and confirm the build completed its shader and asset targets. |
 | CMake reports a generator or toolchain mismatch | Configure into a new build directory when changing generators, compilers, or dependency triplets. |
 | A newly added source or shader is not built | Rerun CMake configuration so its recursive file searches include the new file. |
