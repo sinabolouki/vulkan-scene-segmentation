@@ -24,7 +24,7 @@
 // How many ranks above/below to consider when matching across pixels.
 // ±1 handles single-fragment insertions between pixels.
 // ±2 is more robust for complex geometry with variable overdraw.
-#define RANK_WINDOW    2u
+#define RANK_WINDOW    8u
 
 layout(set = 0, binding = 0, r32ui) uniform readonly uimage2D headPointerImage;
 
@@ -71,7 +71,7 @@ const float W_NORMAL       = 0.25;
 const float W_DEPTH        = 0.25;
 const float W_COLOR        = 0.25;  // Set > 0 to enable color-based filtering
 const float COST_THRESHOLD = 1.0;
-const float VETO_THRESHOLD = 1.0;  // If any term exceeds this, reject immediately
+const float VETO_THRESHOLD = 0.7;  // If any term exceeds this, reject immediately
 const float ACCEPT_THRESHOLD = 0.0;  // If all terms are below this, accept immediately
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -137,22 +137,72 @@ float connectionCost(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
     float depthA = nodes[idxA].depth;
     float depthB = nodes[idxB].depth;
 
-    vec3 posA = reconstructViewPosition(pixelA, depthA);
-    vec3 posB = reconstructViewPosition(pixelB, depthB);
-    vec3 delta = posB - posA;
+    float dA = clamp(depthA, 0.0, 1.0);
+    float dB = clamp(depthB, 0.0, 1.0);
+    float depthRange = pc.farPlane - pc.nearPlane;
+
+    float meanDistance = pc.nearPlane
+        + 0.5 * (dA + dB) * depthRange;
+
+    // Subtract normalized depths before converting to view-space units.
+    float distanceDifference = (dB - dA) * depthRange;
+
+    vec2 viewport = vec2(pc.screenWidth, pc.screenHeight);
+    vec2 inverseProjection = 1.0 / max(
+        abs(vec2(pc.projX, pc.projY)),
+        vec2(1e-6)
+    );
+
+    // Construct the difference between camera rays directly from pixels.
+    vec2 rayDifferenceXY = 2.0 * vec2(pixelB - pixelA)
+        / viewport * inverseProjection * vec2(1.0, -1.0);
+
+    vec3 rayDifference = vec3(rayDifferenceXY, 0.0);
+
+    vec2 midpointNDC =
+        (vec2(pixelA) + vec2(pixelB) + vec2(1.0)) / viewport - 1.0;
+
+    vec3 rayMidpoint = vec3(
+        midpointNDC * inverseProjection * vec2(1.0, -1.0),
+        -1.0
+    );
+
+    vec3 lateralStep = meanDistance * rayDifference;
+
+    // Equivalent displacement, without posB - posA cancellation.
+    vec3 delta = lateralStep + distanceDifference * rayMidpoint;
+    float pixelStep = length(lateralStep);
 
     vec3 normalA = getNodeNormal(idxA);
     vec3 normalB = getNodeNormal(idxB);
-    float normalDot = dot(normalA, normalB);
+    float normalDot = clamp(dot(normalA, normalB), -1.0, 1.0);
+    float normalTerm = 0.5 * (1.0 - normalDot);
 
-    float refDepth = 0.5 * (depthA + depthB);
-    float pixelStep = computePixelStep(pixelA, pixelB, refDepth);
+    vec3 normalSum = normalA + normalB;
+    vec3 meanNormal = normalSum * inversesqrt(
+        max(dot(normalSum, normalSum), 1e-12)
+    );
 
-    // ── Spatial terms ────────────────────────────────────────────────────
-    float normalTerm = (1.0 - normalDot) * 0.5;
+    float denominator = dot(meanNormal, rayMidpoint);
+    float safeDenominator = (denominator < 0.0 ? -1.0 : 1.0)
+        * max(abs(denominator), 1e-4);
 
-    float depthDelta = length(delta);
-    float depthTerm  = depthDelta / max(pc.proximityScale * pixelStep, 1e-6);
+    // Expected displacement along the local tangent plane.
+    vec3 tangentStep = lateralStep - rayMidpoint
+        * (dot(meanNormal, lateralStep) / safeDenominator);
+
+    float tangentSpacing = clamp(
+        length(tangentStep),
+        pixelStep,
+        6.0 * pixelStep
+    );
+
+    // Gradual adjustment instead of an abrupt normalDot > 0.9 switch.
+    float normalAgreement = smoothstep(0.5, 0.95, normalDot);
+    float expectedStep = mix(pixelStep, tangentSpacing, normalAgreement);
+
+    float depthTerm =
+        length(delta) / max(pc.proximityScale * expectedStep, 1e-6);
 
     float planeTerm;
     if (normalDot > 0.25) {
@@ -188,7 +238,7 @@ float connectionCost(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
     if (pc.mergeMode == 1u) {
         if (colorNorm < ACCEPT_THRESHOLD) return colorNorm * 0.5;  // Accept early
         if (colorNorm >= VETO_THRESHOLD)  return 1e30;             // Reject early
-        return (spatialNorm >= 1.0) ? 1e30 : spatialNorm;            // Spatial decides
+        return (spatialNorm >= COST_THRESHOLD) ? 1e30 : spatialNorm;            // Spatial decides
     }
 
     // ── Mode 2: Space priority ───────────────────────────────────────────
@@ -198,7 +248,7 @@ float connectionCost(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
     if (pc.mergeMode == 2u) {
         if (spatialNorm < ACCEPT_THRESHOLD) return spatialNorm * 0.5;  // Accept early
         if (spatialNorm >= VETO_THRESHOLD)  return 1e30;               // Reject early
-        return (colorNorm >= 1.0) ? 1e30 : colorNorm;                    // Color decides
+        return (colorNorm >= COST_THRESHOLD) ? 1e30 : colorNorm;                    // Color decides
     }
 
     // Fallback (shouldn't reach here)
