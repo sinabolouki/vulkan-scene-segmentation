@@ -114,20 +114,42 @@ vec3 unpackColorRGB(uint packed) {
     );
 }
 
+// float colorDistance(uint packedA, uint packedB) {
+//     vec3 colorA = unpackColorRGB(packedA);
+//     vec3 colorB = unpackColorRGB(packedB);
+
+//     float lumA = dot(colorA, vec3(0.299, 0.587, 0.114));
+//     float lumB = dot(colorB, vec3(0.299, 0.587, 0.114));
+
+//     if (lumA < 0.02 && lumB < 0.02) return 0.0;
+//     if (min(lumA, lumB) < 0.02)     return abs(lumA - lumB);
+
+//     vec3 chromA = colorA / max(lumA, 0.01);
+//     vec3 chromB = colorB / max(lumB, 0.01);
+
+//     return length(chromA - chromB);
+// }
+
 float colorDistance(uint packedA, uint packedB) {
-    vec3 colorA = unpackColorRGB(packedA);
-    vec3 colorB = unpackColorRGB(packedB);
+    vec3 a = unpackColorRGB(packedA);
+    vec3 b = unpackColorRGB(packedB);
+    vec3 d = a - b;
 
-    float lumA = dot(colorA, vec3(0.299, 0.587, 0.114));
-    float lumB = dot(colorB, vec3(0.299, 0.587, 0.114));
+    // Brightness difference.
+    float dY = dot(d, vec3(0.25, 0.50, 0.25));
 
-    if (lumA < 0.02 && lumB < 0.02) return 0.0;
-    if (min(lumA, lumB) < 0.02)     return abs(lumA - lumB);
+    // Two color-difference coordinates.
+    float dCo =  0.50 * d.r - 0.50 * d.b;
+    float dCg = -0.25 * d.r + 0.50 * d.g - 0.25 * d.b;
 
-    vec3 chromA = colorA / max(lumA, 0.01);
-    vec3 chromB = colorB / max(lumB, 0.01);
+    // Starting choice: give brightness differences less influence.
+    const float LUMA_WEIGHT = 0.25;
 
-    return length(chromA - chromB);
+    return sqrt(
+        LUMA_WEIGHT * dY * dY +
+        dCo * dCo +
+        dCg * dCg
+    );
 }
 
 // ─── Soft-Cost Connectivity ──────────────────────────────────────────────────
@@ -221,6 +243,7 @@ float connectionCost(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
     // ── Color term ───────────────────────────────────────────────────────
     float colDist = colorDistance(nodes[idxA].unshadedColor, nodes[idxB].unshadedColor);
     float colorNorm = colDist / max(pc.colorThreshold, 1e-6);
+    // colorNorm = 0;
 
     // ── Mode 0: Balanced (weighted sum of all terms) ─────────────────────
     if (pc.mergeMode == 0u) {

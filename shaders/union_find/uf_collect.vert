@@ -9,6 +9,7 @@ layout(location = 0) out vec3 fragColor;
 layout(location = 1) out vec3 fragNormalView;
 layout(location = 2) flat out uint fragObjectID;
 layout(location = 3) out vec2 fragUV;
+layout(location = 4) out vec3 fragPositionView;
 
 layout(push_constant) uniform PushConstants {
     mat4 model;
@@ -23,10 +24,15 @@ layout(push_constant) uniform PushConstants {
 void main() {
     vec4 worldPos = pc.model * vec4(inPosition, 1.0);
     gl_Position = pc.viewProj * worldPos;
+    fragPositionView = (pc.view * worldPos).xyz;
 
-    // Normal in view space
+    // Shading normal in view space. Geometry normals are derived per fragment.
     mat3 normalMatrix = transpose(inverse(mat3(pc.view * pc.model)));
-    fragNormalView = normalize(normalMatrix * inNormal);
+    vec3 normalView = normalMatrix * inNormal;
+    float normalLength2 = dot(normalView, normalView);
+    fragNormalView = normalLength2 > 0.0
+        ? normalView * inversesqrt(normalLength2)
+        : vec3(0.0);
 
     fragColor = inColor;
     fragObjectID = pc.objectID;
