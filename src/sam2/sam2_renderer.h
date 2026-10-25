@@ -17,9 +17,10 @@ class Sam2Renderer
 public:
     struct CapturedLayer
     {
-        uint32_t             width  = 0;
-        uint32_t             height = 0;
-        std::vector<uint8_t> rgba;   // width*height*4
+        uint32_t              width  = 0;
+        uint32_t              height = 0;
+        std::vector<uint8_t>  rgba;       // width*height*4
+        std::vector<uint32_t> regionIds;  // width*height, union-find root, UF_NULL = no fragment
     };
 
     struct Config
@@ -36,6 +37,7 @@ public:
     float    nearPlane      = 0.1f;
     float    farPlane       = 100.0f;
     uint32_t mergeMode      = 0;
+    uint32_t mergeIterations = 2;   // same as UFRenderer::recordCommands
 
     void setTextureManager(TextureManager* mgr) { m_textureManager = mgr; }
 
@@ -99,8 +101,11 @@ private:
                             const std::vector<SceneObject>& objects,
                             const glm::mat4& viewProj, const glm::mat4& view);
     void recordSortPhase(VkCommandBuffer cmd);
+    void recordFullscreenPass(VkCommandBuffer cmd, VkPipeline pipeline, uint32_t targetLayer);
+    void recordUnionFindPhase(VkCommandBuffer cmd);
     void recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex);
     void recordCopyLayerToStaging(VkCommandBuffer cmd, uint32_t layerIndex);
+    void recordCopyRegionLabelsToStaging(VkCommandBuffer cmd);
     void recordMemoryBarrier(VkCommandBuffer cmd,
                              VkPipelineStageFlags srcStage, VkAccessFlags srcAccess,
                              VkPipelineStageFlags dstStage, VkAccessFlags dstAccess);
@@ -135,6 +140,13 @@ private:
     VkBuffer       m_atomicCounterBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_atomicCounterMemory = VK_NULL_HANDLE;
 
+    // Union-find (capture only)
+    VkBuffer       m_parentBuffer       = VK_NULL_HANDLE;
+    VkDeviceMemory m_parentBufferMemory = VK_NULL_HANDLE;
+
+    VkBuffer       m_regionLabelBuffer = VK_NULL_HANDLE;   // width*height uint, one depth layer
+    VkDeviceMemory m_regionLabelMemory = VK_NULL_HANDLE;
+
     // Layer images
     struct LayerImage {
         VkImage        image       = VK_NULL_HANDLE;
@@ -151,7 +163,7 @@ private:
 
     VkSampler m_sampler = VK_NULL_HANDLE;
 
-    // Descriptors (binding 0 head image, 1 nodes, 2 counter)
+    // Descriptors (binding 0 head image, 1 nodes, 2 counter, 3 parents, 4 region labels)
     VkDescriptorSetLayout m_ppllDescLayout = VK_NULL_HANDLE;
     VkDescriptorPool      m_descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet       m_ppllDescSet    = VK_NULL_HANDLE;
@@ -163,11 +175,21 @@ private:
     VkPipeline m_sortPipeline    = VK_NULL_HANDLE;
     VkPipeline m_resolvePipeline = VK_NULL_HANDLE;
 
+    VkPipeline m_initParentsPipeline  = VK_NULL_HANDLE;
+    VkPipeline m_mergePipeline        = VK_NULL_HANDLE;
+    VkPipeline m_compressPipeline     = VK_NULL_HANDLE;
+    VkPipeline m_regionLabelsPipeline = VK_NULL_HANDLE;
+
     // Readback staging
     VkBuffer       m_stagingBuffer     = VK_NULL_HANDLE;
     VkDeviceMemory m_stagingMemory     = VK_NULL_HANDLE;
     VkDeviceSize   m_stagingBufferSize = 0;
     void*          m_stagingMapped     = nullptr;
+
+    VkBuffer       m_labelStagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_labelStagingMemory = VK_NULL_HANDLE;
+    VkDeviceSize   m_labelBufferSize    = 0;
+    void*          m_labelStagingMapped = nullptr;
 
     // One-shot capture
     VkCommandPool   m_captureCmdPool = VK_NULL_HANDLE;

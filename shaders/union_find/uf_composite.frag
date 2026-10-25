@@ -8,6 +8,14 @@ layout(set = 0, binding = 4) uniform sampler2D layer4;
 layout(set = 0, binding = 5) uniform sampler2D layer5;
 layout(set = 0, binding = 6) uniform sampler2D layer6;
 layout(set = 0, binding = 7) uniform sampler2D layer7;
+layout(set = 0, binding = 8) uniform sampler2D layer8;
+layout(set = 0, binding = 9) uniform sampler2D layer9;
+layout(set = 0, binding = 10) uniform sampler2D layer10;
+layout(set = 0, binding = 11) uniform sampler2D layer11;
+layout(set = 0, binding = 12) uniform sampler2D layer12;
+layout(set = 0, binding = 13) uniform sampler2D layer13;
+layout(set = 0, binding = 14) uniform sampler2D layer14;
+layout(set = 0, binding = 15) uniform sampler2D layer15;
 
 layout(push_constant) uniform PushConstants {
     uint numLayers;
@@ -17,14 +25,24 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec4 outColor;
 
 vec4 sampleLayer(uint index, vec2 uv) {
-    if      (index == 0u) return texture(layer0, uv);
-    else if (index == 1u) return texture(layer1, uv);
-    else if (index == 2u) return texture(layer2, uv);
-    else if (index == 3u) return texture(layer3, uv);
-    else if (index == 4u) return texture(layer4, uv);
-    else if (index == 5u) return texture(layer5, uv);
-    else if (index == 6u) return texture(layer6, uv);
-    else                   return texture(layer7, uv);
+    if      (index == 0u)  return texture(layer0, uv);
+    else if (index == 1u)  return texture(layer1, uv);
+    else if (index == 2u)  return texture(layer2, uv);
+    else if (index == 3u)  return texture(layer3, uv);
+    else if (index == 4u)  return texture(layer4, uv);
+    else if (index == 5u)  return texture(layer5, uv);
+    else if (index == 6u)  return texture(layer6, uv);
+    else if (index == 7u)  return texture(layer7, uv);
+    else if (index == 8u)  return texture(layer8, uv);
+    else if (index == 9u)  return texture(layer9, uv);
+    else if (index == 10u) return texture(layer10, uv);
+    else if (index == 11u) return texture(layer11, uv);
+    else if (index == 12u) return texture(layer12, uv);
+    else if (index == 13u) return texture(layer13, uv);
+    else if (index == 14u) return texture(layer14, uv);
+    else if (index == 15u) return texture(layer15, uv);
+
+    return vec4(0.0);
 }
 
 void main() {

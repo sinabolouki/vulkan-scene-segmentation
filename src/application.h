@@ -24,6 +24,7 @@
 #elif defined(RENDER_METHOD_SAM2)
 #include "sam2/sam2_renderer.h"
 #include "sam2/sam2_job.h"      // includes sam2_client.h
+#include "sam2/sam2_eval.h"
 #include <future>
 #include <memory>
 #else
@@ -131,6 +132,8 @@ private:
     VkDeviceMemory m_indexBufferMemory  = VK_NULL_HANDLE;
 
     Camera m_camera;
+    std::string m_cameraStatePath;
+    bool m_cameraInitialized = false;
 
     // Init
     bool createCommandPool();
@@ -154,6 +157,8 @@ private:
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
 
     void initCamera();
+    bool loadCameraState();
+    bool saveCameraState() const;
     void updateCamera();
     void computeCameraMatrices(glm::mat4& view, glm::mat4& proj);
     double m_lastMouseX = 0, m_lastMouseY = 0;
@@ -184,10 +189,17 @@ private:
     std::future<std::pair<bool, std::string>> m_sam2HealthFuture;
     bool m_sam2HealthPending = false;
 
+    // SAM2 vs union-find evaluation
+    int              m_evalMinRegionPixels = 50;
+    sam2::Evaluation m_evaluation;
+    bool             m_hasEvaluation = false;
+
     void runSam2Capture();
     bool startSam2Segmentation();
     void startSam2HealthCheck();
     void pollSam2Job();
+    void runSam2Evaluation();
     void drawSam2Panel();
+    void drawEvaluationTable();
 #endif
 };

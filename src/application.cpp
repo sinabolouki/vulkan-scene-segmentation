@@ -9,6 +9,12 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <locale>
+#include <cmath>
+#include <system_error>
 #include <imgui.h>
 #ifdef RENDER_METHOD_SAM2
 #include "sam2/sam2_io.h"
@@ -29,6 +35,8 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
 {
     m_width = width;
     m_height = height;
+    m_cameraInitialized = false;
+    m_cameraStatePath.clear();
 
     // GLFW
     if (!glfwInit())
@@ -57,6 +65,16 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
         std::cerr << "Failed to load scene: " << scenePath << std::endl;
         return false;
     }
+
+    // One camera file per OBJ; an absolute path also survives working-directory changes.
+    std::error_code cameraPathError;
+    const auto absoluteScenePath = std::filesystem::absolute(scenePath, cameraPathError);
+    if (!cameraPathError)
+        m_cameraStatePath = absoluteScenePath.lexically_normal().string() + ".camera";
+    else
+        std::cerr << "[Camera] Could not resolve camera file path: "
+                  << cameraPathError.message() << '\n';
+
     if (!uploadSceneToGPU())
         return false;
 
@@ -86,7 +104,7 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
 
 #ifdef RENDER_METHOD_SAM2
     m_sam2Status = "Checking SAM2 server...";
-    startSam2HealthCheck();   // async: app starts immediately, result appears in the panel
+    startSam2HealthCheck(); // async: app starts immediately, result appears in the panel
 #endif
 
     if (!m_imguiManager.init(m_context, m_swapchain, m_window))
@@ -168,7 +186,7 @@ void Application::drawFrame()
         m_sam2CaptureNow = false;
         runSam2Capture();
         if (m_sam2AutoSegment && m_sam2LastCapture)
-            startSam2Segmentation();       // returns immediately
+            startSam2Segmentation(); // returns immediately
     }
 #endif
 
@@ -267,12 +285,21 @@ void Application::drawFrame()
 
     ImGui::Separator();
 
-    const char *layerNames[] = {"Composite", "Layer 0", "Layer 1", "Layer 2", "Layer 3",
-                                "Layer 4", "Layer 5", "Layer 6", "Layer 7"};
-    int layerIdx = m_renderer.debugDisplayLayer + 1;
-    ImGui::Combo("Display", &layerIdx, layerNames, 9);
-    m_renderer.debugDisplayLayer = layerIdx - 1;
+    const char *layerNames[] = {
+        "Composite",
+        "Layer 0", "Layer 1", "Layer 2", "Layer 3",
+        "Layer 4", "Layer 5", "Layer 6", "Layer 7",
+        "Layer 8", "Layer 9", "Layer 10", "Layer 11",
+        "Layer 12", "Layer 13", "Layer 14", "Layer 15"};
 
+    int layerIdx = m_renderer.debugDisplayLayer + 1;
+    ImGui::Combo(
+        "Display",
+        &layerIdx,
+        layerNames,
+        IM_ARRAYSIZE(layerNames));
+    m_renderer.debugDisplayLayer = layerIdx - 1;
+    
     ImGui::Separator();
     ImGui::Checkbox("Bypass Union-Find (show front only)", &m_renderer.bypassUnionFind);
 
@@ -373,7 +400,7 @@ void Application::drawFrame()
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR)
     {
-        ImGui::Render();          // close the ImGui frame we already started
+        ImGui::Render(); // close the ImGui frame we already started
         recreateSwapchain();
         return;
     }
@@ -382,20 +409,20 @@ void Application::drawFrame()
     vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0);
     recordCommandBuffer(m_commandBuffers[m_currentFrame], imageIndex);
 
-    VkSemaphore waitSemaphores[]      = {m_swapchain.getImageAvailableSemaphore(m_currentFrame)};
+    VkSemaphore waitSemaphores[] = {m_swapchain.getImageAvailableSemaphore(m_currentFrame)};
     // The SAM2 blit barrier uses COLOR_ATTACHMENT_OUTPUT as its srcStage, so it chains
     // correctly with this wait stage; no need to add TRANSFER here.
     VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    VkSemaphore signalSemaphores[]    = {m_swapchain.getRenderFinishedSemaphore(m_currentFrame)};
+    VkSemaphore signalSemaphores[] = {m_swapchain.getRenderFinishedSemaphore(m_currentFrame)};
 
     VkSubmitInfo submitInfo{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submitInfo.waitSemaphoreCount   = 1;
-    submitInfo.pWaitSemaphores      = waitSemaphores;
-    submitInfo.pWaitDstStageMask    = waitStages;
-    submitInfo.commandBufferCount   = 1;
-    submitInfo.pCommandBuffers      = &m_commandBuffers[m_currentFrame];
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = waitSemaphores;
+    submitInfo.pWaitDstStageMask = waitStages;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &m_commandBuffers[m_currentFrame];
     submitInfo.signalSemaphoreCount = 1;
-    submitInfo.pSignalSemaphores    = signalSemaphores;
+    submitInfo.pSignalSemaphores = signalSemaphores;
 
     if (vkQueueSubmit(m_context.graphics_queue, 1, &submitInfo, inFlightFence) != VK_SUCCESS)
     {
@@ -465,18 +492,22 @@ void Application::run()
 
 void Application::cleanup()
 {
+    // Save before GPU/window teardown. Failed initialization must not overwrite a pose.
+    saveCameraState();
+    m_cameraInitialized = false;
+
     VkDevice device = m_context.device;
 #ifdef RENDER_METHOD_SAM2
     // The worker touches no Vulkan objects, but it must stop before members are destroyed.
     m_sam2Job.cancel();
-    m_sam2Job.join();                        // waits for at most the current SAM2 request
+    m_sam2Job.join(); // waits for at most the current SAM2 request
     if (m_sam2HealthFuture.valid())
         m_sam2HealthFuture.wait();
 #endif
     vkDeviceWaitIdle(device);
 
     m_imguiManager.destroy(device);
-    m_renderer.destroy(device);               // first: its pipeline layout uses the texture set layout
+    m_renderer.destroy(device); // first: its pipeline layout uses the texture set layout
     m_textureManager.destroy(device);
 
     vkDestroyBuffer(device, m_indexBuffer, nullptr);
@@ -591,14 +622,85 @@ void Application::initCamera()
     float radius = m_scene.getRadius();
 
     m_camera.target = center;
-    m_camera.distance = radius * 1.0f;
+    m_camera.distance = glm::max(radius, 0.01f);
     m_camera.yaw = 0.0f;
     m_camera.pitch = 0.3f;
-    // m_camera.target = glm::vec3(-7.68f, 7.01f, 15.53f);
-    // m_camera.distance = 26.20f;
-    // m_camera.yaw = -0.76f;
-    // m_camera.pitch = 0.38f;
     m_camera.updateFromOrbit();
+
+    // Keep the scene-based default if no valid saved pose exists.
+    loadCameraState();
+    m_cameraInitialized = true;
+}
+
+bool Application::loadCameraState()
+{
+    if (m_cameraStatePath.empty())
+        return false;
+
+    std::ifstream file(m_cameraStatePath);
+    if (!file)
+        return false; // Normal on the first run for this scene.
+    file.imbue(std::locale::classic());
+
+    // Parse into a copy so a malformed file cannot partially change the camera.
+    Camera saved = m_camera;
+    std::string magic;
+    int version = 0;
+    if (!(file >> magic >> version) || magic != "THESIS_CAMERA" || version != 1 ||
+        !(file >> saved.target.x >> saved.target.y >> saved.target.z
+               >> saved.yaw >> saved.pitch >> saved.distance))
+    {
+        std::cerr << "[Camera] Ignoring invalid camera file: " << m_cameraStatePath << '\n';
+        return false;
+    }
+
+    if (!std::isfinite(saved.target.x) || !std::isfinite(saved.target.y) ||
+        !std::isfinite(saved.target.z) || !std::isfinite(saved.yaw) ||
+        !std::isfinite(saved.pitch) || !std::isfinite(saved.distance) ||
+        saved.distance < 0.01f || saved.pitch < -1.5f || saved.pitch > 1.5f)
+    {
+        std::cerr << "[Camera] Ignoring out-of-range camera state: " << m_cameraStatePath << '\n';
+        return false;
+    }
+
+    saved.updateFromOrbit();
+    if (!std::isfinite(saved.position.x) || !std::isfinite(saved.position.y) ||
+        !std::isfinite(saved.position.z))
+    {
+        std::cerr << "[Camera] Ignoring invalid camera position: " << m_cameraStatePath << '\n';
+        return false;
+    }
+
+    m_camera = saved;
+    std::cout << "[Camera] Restored pose from " << m_cameraStatePath << '\n';
+    return true;
+}
+
+bool Application::saveCameraState() const
+{
+    if (!m_cameraInitialized || m_cameraStatePath.empty())
+        return false;
+
+    std::ofstream file(m_cameraStatePath, std::ios::trunc);
+    if (!file)
+    {
+        std::cerr << "[Camera] Could not write camera file: " << m_cameraStatePath << '\n';
+        return false;
+    }
+    file.imbue(std::locale::classic());
+    file << std::setprecision(std::numeric_limits<float>::max_digits10)
+         << "THESIS_CAMERA 1\n"
+         << m_camera.target.x << ' ' << m_camera.target.y << ' ' << m_camera.target.z << '\n'
+         << m_camera.yaw << ' ' << m_camera.pitch << ' ' << m_camera.distance << '\n';
+    file.close();
+    if (!file)
+    {
+        std::cerr << "[Camera] Failed to save camera file: " << m_cameraStatePath << '\n';
+        return false;
+    }
+
+    std::cout << "[Camera] Saved pose to " << m_cameraStatePath << '\n';
+    return true;
 }
 
 void Application::updateCamera()
@@ -658,13 +760,13 @@ void Application::updateCamera()
     }
 }
 
-void Application::computeCameraMatrices(glm::mat4& view, glm::mat4& proj)
+void Application::computeCameraMatrices(glm::mat4 &view, glm::mat4 &proj)
 {
     const VkExtent2D extent = m_swapchain.getExtent();
     const float aspect = (float)extent.width / (float)extent.height;
 
     m_renderer.nearPlane = 0.01f;
-    m_renderer.farPlane  = m_camera.distance * 10.0f;
+    m_renderer.farPlane = m_camera.distance * 10.0f;
 
     view = m_camera.getViewMatrix();
     proj = glm::perspective(glm::radians(45.0f), aspect,
@@ -734,7 +836,7 @@ void Application::runSam2Capture()
         return;
     }
 
-    vkDeviceWaitIdle(m_context.device);   // frames in flight may still use the buffers
+    vkDeviceWaitIdle(m_context.device); // frames in flight may still use the buffers
 
     glm::mat4 view, proj;
     computeCameraMatrices(view, proj);
@@ -747,18 +849,20 @@ void Application::runSam2Capture()
                                        m_scene.getObjects(), viewProj, view, proj));
 
         size_t nonEmpty = 0;
-        for (const auto& l : *layers)
-            if (!sam2::isLayerEmpty(l)) ++nonEmpty;
+        for (const auto &l : *layers)
+            if (!sam2::isLayerEmpty(l))
+                ++nonEmpty;
 
         sam2::saveCapturedLayers(*layers, m_sam2OutputDir, /*skipEmpty=*/true);
+        sam2::saveRegionLabelMaps(*layers, (std::filesystem::path(m_sam2OutputDir) / "eval").string());
 
-        m_sam2LastCapture = std::move(layers);   // shared_ptr<LayerSet> -> shared_ptr<const LayerSet>
+        m_sam2LastCapture = std::move(layers); // shared_ptr<LayerSet> -> shared_ptr<const LayerSet>
         m_sam2Results.clear();
+        m_hasEvaluation = false;
 
-        m_sam2Status = "Captured " + std::to_string(m_sam2LastCapture->size()) + " layers ("
-                     + std::to_string(nonEmpty) + " non-empty).";
+        m_sam2Status = "Captured " + std::to_string(m_sam2LastCapture->size()) + " layers (" + std::to_string(nonEmpty) + " non-empty).";
     }
-    catch (const std::exception& e)
+    catch (const std::exception &e)
     {
         m_sam2LastCapture.reset();
         m_sam2Results.clear();
@@ -782,19 +886,19 @@ bool Application::startSam2Segmentation()
         return false;
 
     sam2::JobConfig cfg;
-    cfg.host                 = m_sam2Host;
-    cfg.port                 = m_sam2Port;
+    cfg.host = m_sam2Host;
+    cfg.port = m_sam2Port;
     cfg.params.pointsPerSide = m_sam2PointsPerSide;
-    cfg.maskDir              = (std::filesystem::path(m_sam2OutputDir) / "masks").string();
-    cfg.saveImages           = m_sam2SaveMaskImages;
+    cfg.maskDir = (std::filesystem::path(m_sam2OutputDir) / "masks").string();
+    cfg.saveImages = m_sam2SaveMaskImages;
 
     // Pre-fill one "pending" row per layer (ok=false, error empty)
-    const auto& layers = *m_sam2LastCapture;
+    const auto &layers = *m_sam2LastCapture;
     m_sam2Results.assign(layers.size(), sam2::SegmentResult{});
     for (size_t i = 0; i < layers.size(); ++i)
     {
-        m_sam2Results[i].layer  = int(i);
-        m_sam2Results[i].width  = layers[i].width;
+        m_sam2Results[i].layer = int(i);
+        m_sam2Results[i].width = layers[i].width;
         m_sam2Results[i].height = layers[i].height;
     }
 
@@ -804,8 +908,35 @@ bool Application::startSam2Segmentation()
         return false;
     }
     m_sam2JobActive = true;
-    m_sam2Status    = "Segmenting...";
+    m_hasEvaluation = false;
+    m_sam2Status = "Segmenting...";
     return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SAM2 vs union-find evaluation (main thread, CPU only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Application::runSam2Evaluation()
+{
+    if (!m_sam2LastCapture || m_sam2Results.empty())
+        return;
+
+    m_evaluation = sam2::evaluateSamVsUnionFind(*m_sam2LastCapture, m_sam2Results,
+                                                uint32_t(m_evalMinRegionPixels));
+    m_hasEvaluation = true;
+
+    if (m_evaluation.layers.empty())
+        return; // keep the job's status message (failed / cancelled)
+
+    const std::string csv = (std::filesystem::path(m_sam2OutputDir) / "eval" / "evaluation.csv").string();
+    sam2::saveEvaluationCSV(m_evaluation, csv);
+
+    char buf[160];
+    std::snprintf(buf, sizeof(buf), "Evaluated %zu layers: F1@0.5 = %.3f, UF covering = %.3f (%s)",
+                  m_evaluation.layers.size(), m_evaluation.total.f1At50,
+                  m_evaluation.total.ufCovering, csv.c_str());
+    m_sam2Status = buf;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -814,18 +945,18 @@ bool Application::startSam2Segmentation()
 
 void Application::startSam2HealthCheck()
 {
-    if (m_sam2HealthPending) return;   // never overwrite an unfinished future (its dtor would block)
+    if (m_sam2HealthPending)
+        return; // never overwrite an unfinished future (its dtor would block)
 
-    const std::string host = m_sam2Host;   // copies: the lambda must not touch members
-    const int         port = m_sam2Port;
+    const std::string host = m_sam2Host; // copies: the lambda must not touch members
+    const int port = m_sam2Port;
 
     m_sam2HealthFuture = std::async(std::launch::async, [host, port]()
-    {
+                                    {
         sam2::Sam2Client client(host, port);
         std::string info, err;
         const bool ok = client.health(info, err);
-        return std::make_pair(ok, ok ? info : err);
-    });
+        return std::make_pair(ok, ok ? info : err); });
     m_sam2HealthPending = true;
 }
 
@@ -839,15 +970,16 @@ void Application::pollSam2Job()
     //    before it clears the flag, so "not running" + takeResults() == everything.
     const bool running = m_sam2Job.isRunning();
 
-    for (auto& r : m_sam2Job.takeResults())
+    for (auto &r : m_sam2Job.takeResults())
         if (r.layer >= 0 && size_t(r.layer) < m_sam2Results.size())
             m_sam2Results[size_t(r.layer)] = std::move(r);
 
     if (m_sam2JobActive && !running)
     {
         m_sam2JobActive = false;
-        m_sam2Job.join();                         // thread has exited (or is exiting) -> cheap
+        m_sam2Job.join(); // thread has exited (or is exiting) -> cheap
         m_sam2Status = m_sam2Job.progress().message;
+        runSam2Evaluation();
     }
 
     // 2) Health check result
@@ -866,8 +998,8 @@ void Application::pollSam2Job()
 
 void Application::drawSam2Panel()
 {
-    const bool              running = m_sam2Job.isRunning();
-    const sam2::JobProgress prog    = m_sam2Job.progress();
+    const bool running = m_sam2Job.isRunning();
+    const sam2::JobProgress prog = m_sam2Job.progress();
 
     ImGui::Begin("SAM2 Offline Pipeline");
 
@@ -947,6 +1079,42 @@ void Application::drawSam2Panel()
         }
     }
 
+    // ─── Union-find parameters used by the capture ───
+    if (ImGui::CollapsingHeader("Union-Find (capture)"))
+    {
+        ImGui::TextDisabled("Applied on the next capture.");
+        const char *mergeModes[] = {"Balanced", "Color priority", "Space priority"};
+        int mode = (int)m_renderer.mergeMode;
+        if (ImGui::Combo("Merge Mode", &mode, mergeModes, IM_ARRAYSIZE(mergeModes)))
+            m_renderer.mergeMode = (uint32_t)mode;
+        ImGui::SliderFloat("Plane Threshold", &m_renderer.planeThreshold, 0.1f, 10.0f, "%.2f");
+        ImGui::SliderFloat("Proximity Scale", &m_renderer.proximityScale, 0.5f, 10.0f, "%.2f");
+        ImGui::SliderFloat("Color Threshold", &m_renderer.colorThreshold, 0.05f, 1.5f, "%.2f");
+        int iterations = (int)m_renderer.mergeIterations;
+        if (ImGui::SliderInt("Merge Iterations", &iterations, 1, 8))
+            m_renderer.mergeIterations = (uint32_t)iterations;
+    }
+
+    // ─── SAM2 vs union-find evaluation ───
+    if (ImGui::CollapsingHeader("Evaluation: SAM2 vs Union-Find", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        ImGui::InputInt("Min region pixels", &m_evalMinRegionPixels);
+        m_evalMinRegionPixels = std::max(m_evalMinRegionPixels, 1);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Regions and masks smaller than this are left out of the\n"
+                              "averages and match counts (their pixels still count in IoU).");
+
+        ImGui::BeginDisabled(running || !m_sam2LastCapture || m_sam2Results.empty());
+        if (ImGui::Button("Evaluate"))
+            runSam2Evaluation();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("(runs automatically after segmentation)");
+
+        if (m_hasEvaluation)
+            drawEvaluationTable();
+    }
+
     if (!m_sam2Status.empty())
     {
         ImGui::Separator();
@@ -957,8 +1125,7 @@ void Application::drawSam2Panel()
     if (!m_sam2Results.empty())
     {
         ImGui::Separator();
-        const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
-                                    | ImGuiTableFlags_SizingFixedFit;
+        const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit;
         if (ImGui::BeginTable("sam2_results", 6, flags))
         {
             ImGui::TableSetupColumn("Layer");
@@ -969,10 +1136,10 @@ void Application::drawSam2Panel()
             ImGui::TableSetupColumn("Upload KB");
             ImGui::TableHeadersRow();
 
-            float    sumInference = 0.0f, sumRoundTrip = 0.0f;
+            float sumInference = 0.0f, sumRoundTrip = 0.0f;
             uint32_t sumMasks = 0;
 
-            for (const auto& r : m_sam2Results)
+            for (const auto &r : m_sam2Results)
             {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
@@ -986,9 +1153,12 @@ void Application::drawSam2Panel()
                 else if (!r.error.empty())
                 {
                     const bool notProcessed = r.error.rfind("not processed", 0) == 0;
-                    if (notProcessed) ImGui::TextDisabled("not run");
-                    else              ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "error");
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", r.error.c_str());
+                    if (notProcessed)
+                        ImGui::TextDisabled("not run");
+                    else
+                        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "error");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", r.error.c_str());
                 }
                 else if (running && prog.currentLayer == r.layer)
                     ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "running...");
@@ -997,11 +1167,15 @@ void Application::drawSam2Panel()
 
                 if (r.ok && !r.skipped)
                 {
-                    ImGui::TableSetColumnIndex(2); ImGui::Text("%u",   r.numMasks);
-                    ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f", r.inferenceMs);
-                    ImGui::TableSetColumnIndex(4); ImGui::Text("%.1f", r.roundTripMs);
-                    ImGui::TableSetColumnIndex(5); ImGui::Text("%.1f", r.requestBytes / 1024.0f);
-                    sumMasks     += r.numMasks;
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%u", r.numMasks);
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%.1f", r.inferenceMs);
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::Text("%.1f", r.roundTripMs);
+                    ImGui::TableSetColumnIndex(5);
+                    ImGui::Text("%.1f", r.requestBytes / 1024.0f);
+                    sumMasks += r.numMasks;
                     sumInference += r.inferenceMs;
                     sumRoundTrip += r.roundTripMs;
                 }
@@ -1014,5 +1188,55 @@ void Application::drawSam2Panel()
     }
 
     ImGui::End();
+}
+
+void Application::drawEvaluationTable()
+{
+    if (m_evaluation.layers.empty())
+    {
+        ImGui::TextDisabled("No layer has a SAM2 result to compare.");
+        return;
+    }
+
+    const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit;
+    if (!ImGui::BeginTable("sam2_eval", 9, flags))
+        return;
+
+    ImGui::TableSetupColumn("Layer");
+    ImGui::TableSetupColumn("UF regions");
+    ImGui::TableSetupColumn("SAM masks");
+    ImGui::TableSetupColumn("SAM unlabeled");
+    ImGui::TableSetupColumn("UF best IoU");
+    ImGui::TableSetupColumn("SAM best IoU");
+    ImGui::TableSetupColumn("UF cover");
+    ImGui::TableSetupColumn("Matches >0.5");
+    ImGui::TableSetupColumn("F1@0.5");
+    ImGui::TableHeadersRow();
+
+    auto row = [](const char *label, const sam2::AgreementScore &s)
+    {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(label);
+        ImGui::TableSetColumnIndex(1); ImGui::Text("%u", s.ufRegions);
+        ImGui::TableSetColumnIndex(2); ImGui::Text("%u", s.samMasks);
+        ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f%%", s.samUnlabeled * 100.0f);
+        ImGui::TableSetColumnIndex(4); ImGui::Text("%.3f", s.ufBestIoU);
+        ImGui::TableSetColumnIndex(5); ImGui::Text("%.3f", s.samBestIoU);
+        ImGui::TableSetColumnIndex(6); ImGui::Text("%.3f", s.ufCovering);
+        ImGui::TableSetColumnIndex(7); ImGui::Text("%u (%.3f)", s.matches50, s.matchedIoU);
+        ImGui::TableSetColumnIndex(8); ImGui::Text("%.3f", s.f1At50);
+    };
+
+    for (const auto &l : m_evaluation.layers)
+    {
+        char label[16];
+        std::snprintf(label, sizeof(label), "%d", l.layer);
+        row(label, l.score);
+    }
+    row("All", m_evaluation.total);
+    ImGui::EndTable();
+
+    ImGui::TextDisabled("Best IoU: per region, the best-overlapping region on the other side.\n"
+                        "Matches >0.5: one-to-one region/mask pairs with IoU > 0.5 (mean IoU).");
 }
 #endif // RENDER_METHOD_SAM2

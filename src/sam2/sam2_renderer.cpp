@@ -96,6 +96,23 @@ bool Sam2Renderer::createDataStructures(VulkanContext& ctx)
                       m_atomicCounterBuffer, m_atomicCounterMemory))
         return false;
 
+    // ---- Union-find parent buffer (SSBO, one entry per node) ----------
+    if (!createBuffer(ctx,
+                      m_nodeCapacity * sizeof(uint32_t),
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                      m_parentBuffer, m_parentBufferMemory))
+        return false;
+
+    // ---- Region labels of one depth layer (SSBO, read back) -----------
+    m_labelBufferSize = VkDeviceSize(m_width) * m_height * sizeof(uint32_t);
+    if (!createBuffer(ctx,
+                      m_labelBufferSize,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                      m_regionLabelBuffer, m_regionLabelMemory))
+        return false;
+
     return true;
 }
 
@@ -159,10 +176,12 @@ bool Sam2Renderer::createSampler(VkDevice device)
 
 bool Sam2Renderer::createDescriptorSetLayout(VkDevice device)
 {
-    std::array<VkDescriptorSetLayoutBinding, 3> b{};
+    std::array<VkDescriptorSetLayoutBinding, 5> b{};
     b[0] = {0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     b[1] = {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
     b[2] = {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    b[3] = {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+    b[4] = {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
 
     VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     info.bindingCount = (uint32_t)b.size();
@@ -174,7 +193,7 @@ bool Sam2Renderer::createDescriptorPool(VkDevice device)
 {
     std::array<VkDescriptorPoolSize, 2> sizes{};
     sizes[0] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  1};
-    sizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2};
+    sizes[1] = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4};
 
     VkDescriptorPoolCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     info.poolSizeCount = (uint32_t)sizes.size();
@@ -197,8 +216,10 @@ bool Sam2Renderer::createDescriptorSet(VkDevice device)
 
     VkDescriptorBufferInfo nodeI   {m_nodeBuffer,          0, VK_WHOLE_SIZE};
     VkDescriptorBufferInfo counterI{m_atomicCounterBuffer, 0, sizeof(uint32_t)};
+    VkDescriptorBufferInfo parentI {m_parentBuffer,        0, VK_WHOLE_SIZE};
+    VkDescriptorBufferInfo labelI  {m_regionLabelBuffer,   0, VK_WHOLE_SIZE};
 
-    std::array<VkWriteDescriptorSet, 3> w{};
+    std::array<VkWriteDescriptorSet, 5> w{};
     w[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     w[0].dstSet = m_ppllDescSet; w[0].dstBinding = 0;
     w[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -213,6 +234,16 @@ bool Sam2Renderer::createDescriptorSet(VkDevice device)
     w[2].dstSet = m_ppllDescSet; w[2].dstBinding = 2;
     w[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     w[2].descriptorCount = 1; w[2].pBufferInfo = &counterI;
+
+    w[3] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w[3].dstSet = m_ppllDescSet; w[3].dstBinding = 3;
+    w[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[3].descriptorCount = 1; w[3].pBufferInfo = &parentI;
+
+    w[4] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w[4].dstSet = m_ppllDescSet; w[4].dstBinding = 4;
+    w[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    w[4].descriptorCount = 1; w[4].pBufferInfo = &labelI;
 
     vkUpdateDescriptorSets(device, (uint32_t)w.size(), w.data(), 0, nullptr);
     return true;
@@ -257,18 +288,23 @@ bool Sam2Renderer::createPipelineLayouts(VkDevice device)
 
 bool Sam2Renderer::createPipelines(VkDevice device)
 {
-    // NOTE: These shaders must use only bindings 0/1/2 of the PPLL layout.
-    //       If you don't have them yet, tell me and I'll write the minimal
-    //       sam2_sort.frag / sam2_resolve.frag.
+    // Collect and the union-find passes use the UNION_FIND renderer's shaders, so the
+    // captured fragments and regions match what that renderer computes.
     const std::string sd = "shaders/sam2";
+    const std::string ufd = "shaders/union_find";
 
-    VkShaderModule collectVert   = ShaderUtils::createShaderModule(device, sd + "/sam2_collect.vert.spv");
-    VkShaderModule collectFrag   = ShaderUtils::createShaderModule(device, sd + "/sam2_collect.frag.spv");
+    VkShaderModule collectVert   = ShaderUtils::createShaderModule(device, ufd + "/uf_collect.vert.spv");
+    VkShaderModule collectFrag   = ShaderUtils::createShaderModule(device, ufd + "/uf_collect.frag.spv");
     VkShaderModule fullscreenVert= ShaderUtils::createShaderModule(device, sd + "/sam2_fullscreen.vert.spv");
     VkShaderModule sortFrag      = ShaderUtils::createShaderModule(device, sd + "/sam2_sort.frag.spv");
     VkShaderModule resolveFrag   = ShaderUtils::createShaderModule(device, sd + "/sam2_resolve.frag.spv");
+    VkShaderModule initFrag      = ShaderUtils::createShaderModule(device, ufd + "/uf_init_parents.frag.spv");
+    VkShaderModule mergeFrag     = ShaderUtils::createShaderModule(device, ufd + "/uf_merge.frag.spv");
+    VkShaderModule compressFrag  = ShaderUtils::createShaderModule(device, ufd + "/uf_compress.frag.spv");
+    VkShaderModule labelsFrag    = ShaderUtils::createShaderModule(device, sd + "/sam2_labels.frag.spv");
 
-    if (!collectVert || !collectFrag || !fullscreenVert || !sortFrag || !resolveFrag)
+    if (!collectVert || !collectFrag || !fullscreenVert || !sortFrag || !resolveFrag ||
+        !initFrag || !mergeFrag || !compressFrag || !labelsFrag)
     {
         std::cerr << "[Sam2] Failed to load shaders" << std::endl;
         return false;
@@ -323,11 +359,38 @@ bool Sam2Renderer::createPipelines(VkDevice device)
         .build(device);
     if (!m_resolvePipeline) return false;
 
+    // ---- Union-find + region labels (no attachments) ----
+    auto buildNoAttachment = [&](VkShaderModule frag)
+    {
+        b.clear();
+        return b
+            .setVertexShader(fullscreenVert)
+            .setFragmentShader(frag)
+            .setNoVertexInput()
+            .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+            .setCullMode(VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE)
+            .disableDepthTest()
+            .setNoColorAttachments()
+            .setPipelineLayout(m_fullscreenPipelineLayout)
+            .setRenderPass(m_noAttachmentRenderPass, 0)
+            .build(device);
+    };
+    m_initParentsPipeline  = buildNoAttachment(initFrag);
+    m_mergePipeline        = buildNoAttachment(mergeFrag);
+    m_compressPipeline     = buildNoAttachment(compressFrag);
+    m_regionLabelsPipeline = buildNoAttachment(labelsFrag);
+    if (!m_initParentsPipeline || !m_mergePipeline || !m_compressPipeline || !m_regionLabelsPipeline)
+        return false;
+
     vkDestroyShaderModule(device, collectVert,   nullptr);
     vkDestroyShaderModule(device, collectFrag,   nullptr);
     vkDestroyShaderModule(device, fullscreenVert,nullptr);
     vkDestroyShaderModule(device, sortFrag,      nullptr);
     vkDestroyShaderModule(device, resolveFrag,   nullptr);
+    vkDestroyShaderModule(device, initFrag,      nullptr);
+    vkDestroyShaderModule(device, mergeFrag,     nullptr);
+    vkDestroyShaderModule(device, compressFrag,  nullptr);
+    vkDestroyShaderModule(device, labelsFrag,    nullptr);
     return true;
 }
 
@@ -342,6 +405,15 @@ bool Sam2Renderer::createStagingBuffer(VulkanContext& ctx)
         return false;
 
     if (vkMapMemory(ctx.device, m_stagingMemory, 0, m_stagingBufferSize, 0, &m_stagingMapped) != VK_SUCCESS)
+        return false;
+
+    if (!createBuffer(ctx, m_labelBufferSize,
+                      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      m_labelStagingBuffer, m_labelStagingMemory))
+        return false;
+
+    if (vkMapMemory(ctx.device, m_labelStagingMemory, 0, m_labelBufferSize, 0, &m_labelStagingMapped) != VK_SUCCESS)
         return false;
     return true;
 }
@@ -585,6 +657,80 @@ void Sam2Renderer::recordResolvePhase(VkCommandBuffer cmd, uint32_t layerIndex)
     // After this, layer image is in SHADER_READ_ONLY_OPTIMAL (final layout).
 }
 
+void Sam2Renderer::recordFullscreenPass(VkCommandBuffer cmd, VkPipeline pipeline, uint32_t targetLayer)
+{
+    VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rp.renderPass  = m_noAttachmentRenderPass;
+    rp.framebuffer = m_noAttachmentFramebuffer;
+    rp.renderArea  = { {0, 0}, {m_width, m_height} };
+    vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+    VkViewport vp{0, 0, (float)m_width, (float)m_height, 0, 1};
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    VkRect2D sc = { {0, 0}, {m_width, m_height} };
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            m_fullscreenPipelineLayout, 0, 1, &m_ppllDescSet, 0, nullptr);
+
+    UFFullscreenPushConstants pc{};
+    pc.planeThreshold = planeThreshold;
+    pc.proximityScale = proximityScale;
+    pc.screenWidth    = m_width;
+    pc.screenHeight   = m_height;
+    pc.targetLayer    = targetLayer;
+    pc.nearPlane      = nearPlane;
+    pc.farPlane       = farPlane;
+    pc.projX          = m_projX;
+    pc.projY          = m_projY;
+    pc.colorThreshold = colorThreshold;
+    pc.mergeMode      = mergeMode;
+    vkCmdPushConstants(cmd, m_fullscreenPipelineLayout,
+                       VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+}
+
+void Sam2Renderer::recordUnionFindPhase(VkCommandBuffer cmd)
+{
+    // Same sequence as UFRenderer::recordCommands: init, then (merge, compress) x N.
+    auto shaderBarrier = [&]()
+    {
+        recordMemoryBarrier(cmd,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    };
+
+    recordFullscreenPass(cmd, m_initParentsPipeline, 0);
+    shaderBarrier();
+
+    for (uint32_t iter = 0; iter < mergeIterations; ++iter)
+    {
+        recordFullscreenPass(cmd, m_mergePipeline, 0);
+        shaderBarrier();
+        recordFullscreenPass(cmd, m_compressPipeline, 0);
+        shaderBarrier();
+    }
+}
+
+void Sam2Renderer::recordCopyRegionLabelsToStaging(VkCommandBuffer cmd)
+{
+    recordMemoryBarrier(cmd,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+
+    VkBufferCopy copy{};
+    copy.size = m_labelBufferSize;
+    vkCmdCopyBuffer(cmd, m_regionLabelBuffer, m_labelStagingBuffer, 1, &copy);
+
+    recordMemoryBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+}
+
 void Sam2Renderer::recordCopyLayerToStaging(VkCommandBuffer cmd, uint32_t layerIndex)
 {
     VkImage img = m_layerImages[layerIndex].image;
@@ -689,6 +835,10 @@ void Sam2Renderer::destroy(VkDevice device)
     if (m_collectPipeline) { vkDestroyPipeline(device, m_collectPipeline, nullptr); m_collectPipeline = VK_NULL_HANDLE; }
     if (m_sortPipeline)    { vkDestroyPipeline(device, m_sortPipeline,    nullptr); m_sortPipeline    = VK_NULL_HANDLE; }
     if (m_resolvePipeline) { vkDestroyPipeline(device, m_resolvePipeline, nullptr); m_resolvePipeline = VK_NULL_HANDLE; }
+    if (m_initParentsPipeline)  { vkDestroyPipeline(device, m_initParentsPipeline,  nullptr); m_initParentsPipeline  = VK_NULL_HANDLE; }
+    if (m_mergePipeline)        { vkDestroyPipeline(device, m_mergePipeline,        nullptr); m_mergePipeline        = VK_NULL_HANDLE; }
+    if (m_compressPipeline)     { vkDestroyPipeline(device, m_compressPipeline,     nullptr); m_compressPipeline     = VK_NULL_HANDLE; }
+    if (m_regionLabelsPipeline) { vkDestroyPipeline(device, m_regionLabelsPipeline, nullptr); m_regionLabelsPipeline = VK_NULL_HANDLE; }
 
     if (m_collectPipelineLayout)    { vkDestroyPipelineLayout(device, m_collectPipelineLayout,    nullptr); m_collectPipelineLayout    = VK_NULL_HANDLE; }
     if (m_fullscreenPipelineLayout) { vkDestroyPipelineLayout(device, m_fullscreenPipelineLayout, nullptr); m_fullscreenPipelineLayout = VK_NULL_HANDLE; }
@@ -743,6 +893,10 @@ void Sam2Renderer::destroySizeDependent(VkDevice device)
     if (m_stagingMemory) { vkFreeMemory(device, m_stagingMemory, nullptr);    m_stagingMemory = VK_NULL_HANDLE; }
     m_stagingBufferSize = 0;
 
+    if (m_labelStagingMapped) { vkUnmapMemory(device, m_labelStagingMemory); m_labelStagingMapped = nullptr; }
+    if (m_labelStagingBuffer) { vkDestroyBuffer(device, m_labelStagingBuffer, nullptr); m_labelStagingBuffer = VK_NULL_HANDLE; }
+    if (m_labelStagingMemory) { vkFreeMemory(device, m_labelStagingMemory, nullptr);    m_labelStagingMemory = VK_NULL_HANDLE; }
+
     // Layer images + framebuffers
     for (auto& L : m_layerImages)
     {
@@ -769,6 +923,13 @@ void Sam2Renderer::destroySizeDependent(VkDevice device)
     if (m_atomicCounterBuffer) { vkDestroyBuffer(device, m_atomicCounterBuffer, nullptr); m_atomicCounterBuffer = VK_NULL_HANDLE; }
     if (m_atomicCounterMemory) { vkFreeMemory(device, m_atomicCounterMemory, nullptr);    m_atomicCounterMemory = VK_NULL_HANDLE; }
     m_nodeCapacity = 0;
+
+    // Union-find parents + region labels
+    if (m_parentBuffer)       { vkDestroyBuffer(device, m_parentBuffer, nullptr);      m_parentBuffer       = VK_NULL_HANDLE; }
+    if (m_parentBufferMemory) { vkFreeMemory(device, m_parentBufferMemory, nullptr);   m_parentBufferMemory = VK_NULL_HANDLE; }
+    if (m_regionLabelBuffer)  { vkDestroyBuffer(device, m_regionLabelBuffer, nullptr); m_regionLabelBuffer  = VK_NULL_HANDLE; }
+    if (m_regionLabelMemory)  { vkFreeMemory(device, m_regionLabelMemory, nullptr);    m_regionLabelMemory  = VK_NULL_HANDLE; }
+    m_labelBufferSize = 0;
 }
 
 bool Sam2Renderer::createRenderPasses(VkDevice device)
@@ -916,7 +1077,7 @@ Sam2Renderer::captureSnapshot(VulkanContext& ctx,
         vkWaitForFences(ctx.device, 1, &m_captureFence, VK_TRUE, UINT64_MAX);
     };
 
-    // ---- Submit A: clear + collect + sort ----
+    // ---- Submit A: clear + collect + sort + union-find ----
     submitAndWait([&](VkCommandBuffer cmd)
     {
         recordClearPhase(cmd);
@@ -927,9 +1088,14 @@ Sam2Renderer::captureSnapshot(VulkanContext& ctx,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
         recordSortPhase(cmd);
+        recordMemoryBarrier(cmd,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+        recordUnionFindPhase(cmd);
     }, "A");
 
-    // ---- Submit B_i: resolve layer i + copy to staging ----
+    // ---- Submit B_i: resolve layer i + region labels of layer i, copy both to staging ----
     for (uint32_t i = 0; i < m_cfg.maxLayers; ++i)
     {
         submitAndWait([&](VkCommandBuffer cmd)
@@ -942,10 +1108,16 @@ Sam2Renderer::captureSnapshot(VulkanContext& ctx,
 
             recordResolvePhase(cmd, i);
             recordCopyLayerToStaging(cmd, i);
+
+            recordFullscreenPass(cmd, m_regionLabelsPipeline, i);
+            recordCopyRegionLabelsToStaging(cmd);
         }, "B");
 
         results[i].rgba.resize(static_cast<size_t>(m_stagingBufferSize));
         std::memcpy(results[i].rgba.data(), m_stagingMapped, static_cast<size_t>(m_stagingBufferSize));
+
+        results[i].regionIds.resize(size_t(m_width) * m_height);
+        std::memcpy(results[i].regionIds.data(), m_labelStagingMapped, static_cast<size_t>(m_labelBufferSize));
     }
 
     std::cout << "[Sam2] Captured " << m_cfg.maxLayers
