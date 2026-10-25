@@ -16,6 +16,15 @@
 #include <cmath>
 #include <system_error>
 #include <imgui.h>
+
+// A private stb implementation avoids duplicate symbols with sam2_io.cpp and
+// keeps screenshot encoding independent of the selected renderer.
+#define STB_IMAGE_WRITE_STATIC
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+#undef STB_IMAGE_WRITE_IMPLEMENTATION
+#undef STB_IMAGE_WRITE_STATIC
+
 #ifdef RENDER_METHOD_SAM2
 #include "sam2/sam2_io.h"
 #endif
@@ -65,6 +74,7 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
         std::cerr << "Failed to load scene: " << scenePath << std::endl;
         return false;
     }
+    m_screenshotSceneName = std::filesystem::path(scenePath).stem().string();
 
     // One camera file per OBJ; an absolute path also survives working-directory changes.
     std::error_code cameraPathError;
@@ -157,6 +167,10 @@ void Application::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex)
                               m_scene.getObjects(),
                               viewProj, view, proj, imageIndex);
 #endif
+
+    // Capture the completed scene while it still contains no ImGui pixels.
+    if (m_screenshotBuffer != VK_NULL_HANDLE)
+        recordScreenshot(cmd, imageIndex);
 
     // 3) ImGui on top
     m_imguiManager.render(cmd, extent, m_imguiManager.getFramebuffer(imageIndex));
@@ -387,6 +401,7 @@ void Application::drawFrame()
 #elif defined(RENDER_METHOD_SAM2)
     drawSam2Panel();
 #endif
+    drawScreenshotPanel();
     // ─── End ImGui UI ───
 
     VkFence inFlightFence = m_swapchain.getInFlightFence(m_currentFrame);
@@ -403,6 +418,15 @@ void Application::drawFrame()
         ImGui::Render(); // close the ImGui frame we already started
         recreateSwapchain();
         return;
+    }
+
+    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
+        throw std::runtime_error("Failed to acquire swapchain image");
+
+    if (m_screenshotRequested)
+    {
+        m_screenshotRequested = false;
+        prepareScreenshot();
     }
 
     vkResetFences(m_context.device, 1, &inFlightFence);
@@ -426,8 +450,13 @@ void Application::drawFrame()
 
     if (vkQueueSubmit(m_context.graphics_queue, 1, &submitInfo, inFlightFence) != VK_SUCCESS)
     {
-        std::cerr << "Failed to submit command buffer" << std::endl;
+        destroyScreenshotBuffer();
+        throw std::runtime_error("Failed to submit command buffer");
     }
+
+    // Only a requested screenshot waits here; ordinary frames keep their usual flow.
+    if (m_screenshotBuffer != VK_NULL_HANDLE)
+        finishScreenshot(inFlightFence);
 
     result = m_swapchain.present(m_context.present_queue, imageIndex, signalSemaphores[0]);
 
@@ -505,6 +534,8 @@ void Application::cleanup()
         m_sam2HealthFuture.wait();
 #endif
     vkDeviceWaitIdle(device);
+
+    destroyScreenshotBuffer();
 
     m_imguiManager.destroy(device);
     m_renderer.destroy(device); // first: its pipeline layout uses the texture set layout
@@ -610,6 +641,246 @@ uint32_t Application::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags 
             return i;
     }
     return 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Screenshots
+// ─────────────────────────────────────────────────────────────────────────────
+
+void Application::drawScreenshotPanel()
+{
+    ImGui::Begin("Screenshots", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::BeginDisabled(!m_swapchain.supportsScreenshots() || m_screenshotRequested);
+    if (ImGui::Button("Save scene as PNG"))
+        m_screenshotRequested = true;
+    ImGui::EndDisabled();
+    ImGui::TextUnformatted("Scene only, without the interface.");
+    if (!m_swapchain.supportsScreenshots())
+        ImGui::TextWrapped("Screenshot capture is unavailable on this surface.");
+    if (!m_screenshotStatus.empty())
+        ImGui::TextWrapped("%s", m_screenshotStatus.c_str());
+    ImGui::End();
+}
+
+bool Application::prepareScreenshot()
+{
+    const auto fail = [this](const std::string& message) {
+        m_screenshotStatus = message;
+        std::cerr << "[Screenshot] " << message << '\n';
+        destroyScreenshotBuffer();
+        return false;
+    };
+
+    if (!m_swapchain.supportsScreenshots())
+        return fail("The swapchain does not support image readback.");
+
+    m_screenshotExtent = m_swapchain.getExtent();
+    m_screenshotFormat = m_swapchain.getImageFormat();
+    switch (m_screenshotFormat)
+    {
+    case VK_FORMAT_B8G8R8A8_SRGB:
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+    case VK_FORMAT_R8G8B8A8_UNORM:
+        break;
+    default:
+        return fail("Screenshot capture supports 8-bit RGBA/BGRA swapchain formats.");
+    }
+
+    VkFormatProperties formatProperties{};
+    vkGetPhysicalDeviceFormatProperties(m_context.physical_device, m_screenshotFormat,
+                                        &formatProperties);
+    if (!(formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT))
+        return fail("The swapchain format does not support transfer reads.");
+
+    const auto extent = m_screenshotExtent;
+    if (extent.width == 0 || extent.height == 0 ||
+        extent.width > uint32_t(std::numeric_limits<int>::max() / 4) ||
+        extent.height > uint32_t(std::numeric_limits<int>::max()))
+        return fail("Invalid screenshot dimensions.");
+
+    m_screenshotSize = VkDeviceSize(extent.width) * extent.height * 4;
+    if (m_screenshotSize > std::numeric_limits<size_t>::max())
+        return fail("The screenshot is too large for host memory.");
+
+    VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bufferInfo.size = m_screenshotSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(m_context.device, &bufferInfo, nullptr, &m_screenshotBuffer) != VK_SUCCESS)
+        return fail("Could not create the screenshot buffer.");
+
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(m_context.device, m_screenshotBuffer, &requirements);
+    VkPhysicalDeviceMemoryProperties memoryProperties{};
+    vkGetPhysicalDeviceMemoryProperties(m_context.physical_device, &memoryProperties);
+
+    // Prefer coherent memory, but support non-coherent host-visible memory too.
+    uint32_t memoryType = UINT32_MAX;
+    const VkMemoryPropertyFlags preferences[] = {
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+    };
+    for (const auto required : preferences)
+    {
+        for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i)
+        {
+            if ((requirements.memoryTypeBits & (1u << i)) &&
+                (memoryProperties.memoryTypes[i].propertyFlags & required) == required)
+            {
+                memoryType = i;
+                break;
+            }
+        }
+        if (memoryType != UINT32_MAX)
+            break;
+    }
+    if (memoryType == UINT32_MAX)
+        return fail("Could not find host-visible memory for the screenshot.");
+
+    m_screenshotMemoryCoherent =
+        (memoryProperties.memoryTypes[memoryType].propertyFlags &
+         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+
+    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = memoryType;
+    if (vkAllocateMemory(m_context.device, &allocation, nullptr, &m_screenshotMemory) != VK_SUCCESS)
+        return fail("Could not allocate screenshot memory.");
+    if (vkBindBufferMemory(m_context.device, m_screenshotBuffer, m_screenshotMemory, 0) != VK_SUCCESS)
+        return fail("Could not bind screenshot memory.");
+
+    m_screenshotStatus = "Saving screenshot...";
+    return true;
+}
+
+void Application::recordScreenshot(VkCommandBuffer cmd, uint32_t imageIndex)
+{
+    // The renderer (including the SAM2 preview blit) leaves this image in PRESENT.
+    VkImageMemoryBarrier toCopy{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toCopy.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toCopy.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    toCopy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toCopy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toCopy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toCopy.image = m_swapchain.getImage(imageIndex);
+    toCopy.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toCopy);
+
+    VkBufferImageCopy region{};
+    // Zero bufferRowLength/bufferImageHeight means tightly packed rows.
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {m_screenshotExtent.width, m_screenshotExtent.height, 1};
+    vkCmdCopyImageToBuffer(cmd, m_swapchain.getImage(imageIndex),
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_screenshotBuffer, 1, &region);
+
+    VkImageMemoryBarrier toImGui = toCopy;
+    toImGui.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toImGui.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    toImGui.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toImGui.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    VkBufferMemoryBarrier toHost{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    toHost.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toHost.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    toHost.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toHost.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toHost.buffer = m_screenshotBuffer;
+    toHost.offset = 0;
+    toHost.size = m_screenshotSize;
+
+    // Restore the layout expected by ImGui and make the buffer visible to the CPU.
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 0, nullptr, 1, &toHost, 1, &toImGui);
+}
+
+void Application::finishScreenshot(VkFence submittedFrameFence)
+{
+    // Read only after this frame's copy (and UI rendering) has completed on the GPU.
+    if (vkWaitForFences(m_context.device, 1, &submittedFrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+        throw std::runtime_error("Failed to wait for screenshot GPU copy");
+
+    const auto fail = [this](const std::string& message) {
+        m_screenshotStatus = message;
+        std::cerr << "[Screenshot] " << message << '\n';
+        destroyScreenshotBuffer();
+    };
+
+    void* mapped = nullptr;
+    if (vkMapMemory(m_context.device, m_screenshotMemory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
+    {
+        fail("Could not map screenshot memory.");
+        return;
+    }
+    if (!m_screenshotMemoryCoherent)
+    {
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = m_screenshotMemory;
+        range.offset = 0;
+        range.size = VK_WHOLE_SIZE; // Whole allocation satisfies nonCoherentAtomSize alignment.
+        if (vkInvalidateMappedMemoryRanges(m_context.device, 1, &range) != VK_SUCCESS)
+        {
+            vkUnmapMemory(m_context.device, m_screenshotMemory);
+            fail("Could not invalidate screenshot memory.");
+            return;
+        }
+    }
+
+    const auto extent = m_screenshotExtent;
+    const size_t pixelCount = size_t(extent.width) * extent.height;
+    const bool bgra = m_screenshotFormat == VK_FORMAT_B8G8R8A8_SRGB ||
+                      m_screenshotFormat == VK_FORMAT_B8G8R8A8_UNORM;
+    const auto* source = static_cast<const uint8_t*>(mapped);
+    std::vector<uint8_t> rgb(pixelCount * 3);
+    for (size_t i = 0; i < pixelCount; ++i)
+    {
+        rgb[i * 3 + 0] = source[i * 4 + (bgra ? 2 : 0)];
+        rgb[i * 3 + 1] = source[i * 4 + 1];
+        rgb[i * 3 + 2] = source[i * 4 + (bgra ? 0 : 2)];
+    }
+    vkUnmapMemory(m_context.device, m_screenshotMemory);
+    destroyScreenshotBuffer();
+
+    const std::filesystem::path directory("screenshots");
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error)
+    {
+        fail("Could not create screenshot directory: " + error.message());
+        return;
+    }
+
+    const auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const auto path = directory / (m_screenshotSceneName + "_" + std::to_string(timestamp) + ".png");
+    // Vulkan image rows already run top-to-bottom; no OpenGL-style vertical flip.
+    if (!stbi_write_png(path.string().c_str(), int(extent.width), int(extent.height), 3,
+                         rgb.data(), int(extent.width) * 3))
+    {
+        fail("Could not write PNG: " + path.string());
+        return;
+    }
+
+    m_screenshotStatus = "Saved " + path.string();
+    std::cout << "[Screenshot] " << m_screenshotStatus << '\n';
+}
+
+void Application::destroyScreenshotBuffer()
+{
+    if (m_screenshotBuffer != VK_NULL_HANDLE)
+        vkDestroyBuffer(m_context.device, m_screenshotBuffer, nullptr);
+    if (m_screenshotMemory != VK_NULL_HANDLE)
+        vkFreeMemory(m_context.device, m_screenshotMemory, nullptr);
+    m_screenshotBuffer = VK_NULL_HANDLE;
+    m_screenshotMemory = VK_NULL_HANDLE;
+    m_screenshotSize = 0;
+    m_screenshotExtent = {0, 0};
+    m_screenshotFormat = VK_FORMAT_UNDEFINED;
+    m_screenshotMemoryCoherent = false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -135,6 +135,17 @@ private:
     std::string m_cameraStatePath;
     bool m_cameraInitialized = false;
 
+    // One-shot scene capture. The GPU copy is recorded before the ImGui pass.
+    bool m_screenshotRequested = false;
+    std::string m_screenshotSceneName = "scene";
+    std::string m_screenshotStatus;
+    VkBuffer m_screenshotBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_screenshotMemory = VK_NULL_HANDLE;
+    VkDeviceSize m_screenshotSize = 0;
+    VkExtent2D m_screenshotExtent = {0, 0};
+    VkFormat m_screenshotFormat = VK_FORMAT_UNDEFINED;
+    bool m_screenshotMemoryCoherent = false;
+
     // Init
     bool createCommandPool();
     bool createCommandBuffers();
@@ -145,6 +156,13 @@ private:
     void drawFrame();
     void recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex);
     void recreateSwapchain();   // NEW: single place for resize handling
+
+    // Screenshots
+    void drawScreenshotPanel();
+    bool prepareScreenshot();
+    void recordScreenshot(VkCommandBuffer cmd, uint32_t imageIndex);
+    void finishScreenshot(VkFence submittedFrameFence);
+    void destroyScreenshotBuffer();
 
     // Callbacks
     static void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods);

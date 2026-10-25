@@ -27,6 +27,7 @@ public:
     uint32_t getImageCount() const { return static_cast<uint32_t>(m_images.size()); }
     VkImageView getImageView(uint32_t index) const { return m_imageViews[index]; }
     VkImage getImage(uint32_t index) const { return m_images[index]; }
+    bool supportsScreenshots() const { return m_screenshotsSupported; }
 
     // Sync objects (per frame-in-flight)
     static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
@@ -54,6 +55,7 @@ private:
     // Swapchain
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     VkFormat m_imageFormat = VK_FORMAT_UNDEFINED;
+    bool m_screenshotsSupported = false;
     VkExtent2D m_extent = {0, 0};
     std::vector<VkImage> m_images;
     std::vector<VkImageView> m_imageViews;

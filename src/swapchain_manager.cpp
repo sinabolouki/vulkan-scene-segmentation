@@ -82,15 +82,25 @@ VkResult SwapchainManager::present(VkQueue presentQueue, uint32_t imageIndex, Vk
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool SwapchainManager::createSwapchain(VulkanContext& context, uint32_t width, uint32_t height) {
+    VkSurfaceCapabilitiesKHR capabilities{};
+    m_screenshotsSupported =
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(context.physical_device, context.surface,
+                                                   &capabilities) == VK_SUCCESS &&
+        (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+
     vkb::SwapchainBuilder swapchainBuilder(context.physical_device, context.device, context.surface);
 
-    auto swapchainResult = swapchainBuilder
+    swapchainBuilder
         .set_desired_extent(width, height)
         .set_desired_format({VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR})
         .set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)   // Triple buffering
         .set_required_min_image_count(2)
-        .add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT)  // For clears/blits
-        .build();
+        .add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT); // For clears/blits
+
+    if (m_screenshotsSupported)
+        swapchainBuilder.add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+
+    auto swapchainResult = swapchainBuilder.build();
 
     if (!swapchainResult) {
         std::cerr << "Failed to create swapchain: " << swapchainResult.error().message() << std::endl;
