@@ -115,6 +115,13 @@ vec3 unpackColorRGB(uint packed) {
 }
 
 // float colorDistance(uint packedA, uint packedB) {
+//     vec3 a = unpackColorRGB(packedA);
+//     vec3 b = unpackColorRGB(packedB);
+
+//     return length(a - b);
+// }
+
+// float colorDistance(uint packedA, uint packedB) {
 //     vec3 colorA = unpackColorRGB(packedA);
 //     vec3 colorB = unpackColorRGB(packedB);
 

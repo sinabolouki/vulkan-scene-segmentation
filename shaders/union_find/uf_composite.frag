@@ -62,8 +62,8 @@ void main() {
     }
 
     // Normal composite: back-to-front
-    vec3 result = vec3(0.02, 0.02, 0.08);
-
+    // vec3 result = vec3(0.02, 0.02, 0.08);
+    vec3 result = vec3(1);
     for (uint i = numLayers; i > 0u; i--) {
         vec4 c = sampleLayer(i - 1u, uv);
         if (c.a > 0.01) result = c.rgb;

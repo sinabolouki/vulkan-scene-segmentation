@@ -117,6 +117,10 @@ private:
     double m_frameTimeMs = 0.0;
     double m_fps = 0.0;
 
+    std::chrono::steady_clock::time_point m_fpsWindowStart{};
+    uint32_t m_fpsWindowFrames = 0;
+    double m_avgFps1s = 0.0;
+
     // Scene
     Scene m_scene;
 

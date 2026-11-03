@@ -113,7 +113,7 @@ vec3 hashColor(uint id) {
     vec3 color = vec3(float(r), float(g), float(b)) / 255.0;
     float maxC = max(color.r, max(color.g, color.b));
     if (maxC < 0.3) color += 0.3;
-    color = normalize(color) * 0.8 + 0.1;
+    color = normalize(color) * 0.8 - 0.1;
 
     return clamp(color, 0.0, 1.0);
 }
@@ -128,7 +128,7 @@ vec4 unpackColor(uint packed) {
 }
 
 // Mode 6 options. These do not require changes to the renderer's push constants.
-const float MODE6_LAYER_OPACITY = 0.75;
+const float MODE6_LAYER_OPACITY = 0.5;
 const bool MODE6_FLAT_COLORS = false;
 const bool MODE6_SHOW_LEGEND = true;
 const vec3 MODE6_BACKGROUND = vec3(0.02, 0.02, 0.08);
@@ -240,8 +240,8 @@ vec4 mode6Color(ivec2 coord) {
     ivec2 extent = min(ivec2(screenWidth, screenHeight), imageSize(headPointerImage));
     if (!mode6Inside(coord, extent)) return vec4(MODE6_BACKGROUND, 1.0);
 
-    vec4 legendColor;
-    if (mode6Legend(coord, extent, legendColor)) return legendColor;
+    // vec4 legendColor;
+    // if (mode6Legend(coord, extent, legendColor)) return legendColor;
 
     // The allocation counter can exceed capacity when collection overflows.
     uint validNodeCount = min(counter,
@@ -312,7 +312,8 @@ void main() {
 
     // No fragment at this pixel
     if (idx == NULL_IDX || idx >= counter) {
-        outColor = vec4(0.02, 0.02, 0.08, 1.0);
+        // outColor = vec4(0.02, 0.02, 0.08, 1.0);
+        outColor = vec4(1.0);
         return;
     }
 

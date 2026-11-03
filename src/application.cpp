@@ -257,6 +257,7 @@ void Application::drawFrame()
     ImGui::Separator();
 
     // ─── Performance ───
+    ImGui::Text("FPS (1 s average): %.1f", m_avgFps1s);
     ImGui::Text("FPS: %.1f (%.2f ms)", m_fps, m_frameTimeMs);
     ImGui::Text("Camera data: ");
     ImGui::Text("pos  X: %.2f, Y: %.2f, Z: %.2f", m_camera.position.x, m_camera.position.y, m_camera.position.z);
@@ -313,7 +314,7 @@ void Application::drawFrame()
         layerNames,
         IM_ARRAYSIZE(layerNames));
     m_renderer.debugDisplayLayer = layerIdx - 1;
-    
+
     ImGui::Separator();
     ImGui::Checkbox("Bypass Union-Find (show front only)", &m_renderer.bypassUnionFind);
 
@@ -460,6 +461,24 @@ void Application::drawFrame()
 
     result = m_swapchain.present(m_context.present_queue, imageIndex, signalSemaphores[0]);
 
+    if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR)
+    {
+        ++m_fpsWindowFrames;
+
+        const auto now = std::chrono::steady_clock::now();
+        const double elapsedSeconds =
+            std::chrono::duration<double>(now - m_fpsWindowStart).count();
+
+        if (elapsedSeconds >= 1.0)
+        {
+            m_avgFps1s =
+                static_cast<double>(m_fpsWindowFrames) / elapsedSeconds;
+
+            m_fpsWindowFrames = 0;
+            m_fpsWindowStart = now;
+        }
+    }
+
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || m_framebufferResized)
     {
         m_framebufferResized = false;
@@ -511,6 +530,8 @@ void Application::keyCallback(GLFWwindow *window, int key, int scancode, int act
 
 void Application::run()
 {
+    m_fpsWindowStart = std::chrono::steady_clock::now();
+    m_fpsWindowFrames = 0;
     while (!glfwWindowShouldClose(m_window))
     {
         glfwPollEvents();
@@ -664,7 +685,8 @@ void Application::drawScreenshotPanel()
 
 bool Application::prepareScreenshot()
 {
-    const auto fail = [this](const std::string& message) {
+    const auto fail = [this](const std::string &message)
+    {
         m_screenshotStatus = message;
         std::cerr << "[Screenshot] " << message << '\n';
         destroyScreenshotBuffer();
@@ -719,8 +741,7 @@ bool Application::prepareScreenshot()
     uint32_t memoryType = UINT32_MAX;
     const VkMemoryPropertyFlags preferences[] = {
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-    };
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT};
     for (const auto required : preferences)
     {
         for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; ++i)
@@ -804,13 +825,14 @@ void Application::finishScreenshot(VkFence submittedFrameFence)
     if (vkWaitForFences(m_context.device, 1, &submittedFrameFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
         throw std::runtime_error("Failed to wait for screenshot GPU copy");
 
-    const auto fail = [this](const std::string& message) {
+    const auto fail = [this](const std::string &message)
+    {
         m_screenshotStatus = message;
         std::cerr << "[Screenshot] " << message << '\n';
         destroyScreenshotBuffer();
     };
 
-    void* mapped = nullptr;
+    void *mapped = nullptr;
     if (vkMapMemory(m_context.device, m_screenshotMemory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
     {
         fail("Could not map screenshot memory.");
@@ -834,7 +856,7 @@ void Application::finishScreenshot(VkFence submittedFrameFence)
     const size_t pixelCount = size_t(extent.width) * extent.height;
     const bool bgra = m_screenshotFormat == VK_FORMAT_B8G8R8A8_SRGB ||
                       m_screenshotFormat == VK_FORMAT_B8G8R8A8_UNORM;
-    const auto* source = static_cast<const uint8_t*>(mapped);
+    const auto *source = static_cast<const uint8_t *>(mapped);
     std::vector<uint8_t> rgb(pixelCount * 3);
     for (size_t i = 0; i < pixelCount; ++i)
     {
@@ -855,11 +877,12 @@ void Application::finishScreenshot(VkFence submittedFrameFence)
     }
 
     const auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
     const auto path = directory / (m_screenshotSceneName + "_" + std::to_string(timestamp) + ".png");
     // Vulkan image rows already run top-to-bottom; no OpenGL-style vertical flip.
     if (!stbi_write_png(path.string().c_str(), int(extent.width), int(extent.height), 3,
-                         rgb.data(), int(extent.width) * 3))
+                        rgb.data(), int(extent.width) * 3))
     {
         fail("Could not write PNG: " + path.string());
         return;
@@ -918,8 +941,7 @@ bool Application::loadCameraState()
     std::string magic;
     int version = 0;
     if (!(file >> magic >> version) || magic != "THESIS_CAMERA" || version != 1 ||
-        !(file >> saved.target.x >> saved.target.y >> saved.target.z
-               >> saved.yaw >> saved.pitch >> saved.distance))
+        !(file >> saved.target.x >> saved.target.y >> saved.target.z >> saved.yaw >> saved.pitch >> saved.distance))
     {
         std::cerr << "[Camera] Ignoring invalid camera file: " << m_cameraStatePath << '\n';
         return false;
@@ -1487,15 +1509,24 @@ void Application::drawEvaluationTable()
     auto row = [](const char *label, const sam2::AgreementScore &s)
     {
         ImGui::TableNextRow();
-        ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(label);
-        ImGui::TableSetColumnIndex(1); ImGui::Text("%u", s.ufRegions);
-        ImGui::TableSetColumnIndex(2); ImGui::Text("%u", s.samMasks);
-        ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f%%", s.samUnlabeled * 100.0f);
-        ImGui::TableSetColumnIndex(4); ImGui::Text("%.3f", s.ufBestIoU);
-        ImGui::TableSetColumnIndex(5); ImGui::Text("%.3f", s.samBestIoU);
-        ImGui::TableSetColumnIndex(6); ImGui::Text("%.3f", s.ufCovering);
-        ImGui::TableSetColumnIndex(7); ImGui::Text("%u (%.3f)", s.matches50, s.matchedIoU);
-        ImGui::TableSetColumnIndex(8); ImGui::Text("%.3f", s.f1At50);
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted(label);
+        ImGui::TableSetColumnIndex(1);
+        ImGui::Text("%u", s.ufRegions);
+        ImGui::TableSetColumnIndex(2);
+        ImGui::Text("%u", s.samMasks);
+        ImGui::TableSetColumnIndex(3);
+        ImGui::Text("%.1f%%", s.samUnlabeled * 100.0f);
+        ImGui::TableSetColumnIndex(4);
+        ImGui::Text("%.3f", s.ufBestIoU);
+        ImGui::TableSetColumnIndex(5);
+        ImGui::Text("%.3f", s.samBestIoU);
+        ImGui::TableSetColumnIndex(6);
+        ImGui::Text("%.3f", s.ufCovering);
+        ImGui::TableSetColumnIndex(7);
+        ImGui::Text("%u (%.3f)", s.matches50, s.matchedIoU);
+        ImGui::TableSetColumnIndex(8);
+        ImGui::Text("%.3f", s.f1At50);
     };
 
     for (const auto &l : m_evaluation.layers)
