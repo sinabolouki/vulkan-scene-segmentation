@@ -186,6 +186,15 @@ private:
     double m_lastMouseX = 0, m_lastMouseY = 0;
     bool   m_firstMouse = true;
 
+#ifdef RENDER_METHOD_UNION_FIND
+    void updateRegionSelectionInput();
+
+    bool m_regionPickPending = false;
+    bool m_regionPickDragging = false;
+    double m_regionPickStartX = 0.0;
+    double m_regionPickStartY = 0.0;
+#endif
+
 #ifdef RENDER_METHOD_SAM2
     // ─── SAM2 offline pipeline (m_renderer IS the Sam2Renderer) ───
     // Deferred action: capture needs Vulkan -> runs at the start of drawFrame

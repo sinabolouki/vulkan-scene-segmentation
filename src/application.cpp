@@ -206,6 +206,11 @@ void Application::drawFrame()
 
     // Begin ImGui frame (before fence wait is fine — ImGui just builds draw lists)
     m_imguiManager.beginFrame();
+
+    #ifdef RENDER_METHOD_UNION_FIND
+    updateRegionSelectionInput();
+    #endif
+
     updateCamera();
 
     // ─── ImGui UI ───
@@ -331,7 +336,8 @@ void Application::drawFrame()
         "Fragment Color",      //  4
         "Fragment Count Heat", //  5
         "Peel Layer",          //  6
-        "Region Rank Span"     //  7
+        "Region Rank Span",     //  7
+        "Selected Region"      //  8
     };
 
     // Offset by 1 so index 0 = "Normal Rendering" = debugVisualizationMode -1
@@ -339,6 +345,29 @@ void Application::drawFrame()
     if (ImGui::Combo("Vis Mode", &current, debugModes, IM_ARRAYSIZE(debugModes)))
     {
         m_renderer.debugVisualizationMode = current - 1;
+        m_renderer.clearRegionSelection(); // clear selection when changing modes
+    }
+
+    if (m_renderer.debugVisualizationMode == 8)
+    {
+        ImGui::Separator();
+
+        if (m_renderer.bypassUnionFind)
+        {
+            m_renderer.clearRegionSelection();
+            ImGui::TextWrapped(
+                "Disable Bypass Union-Find to select regions.");
+        }
+        else
+        {
+            ImGui::TextUnformatted("Left click: select region");
+            ImGui::TextUnformatted("Left drag: orbit camera");
+
+            if (ImGui::Button("Clear Selection"))
+            {
+                m_renderer.clearRegionSelection();
+            }
+        }
     }
 
     ImGui::Separator();
@@ -996,6 +1025,112 @@ bool Application::saveCameraState() const
     return true;
 }
 
+#ifdef RENDER_METHOD_UNION_FIND
+void Application::updateRegionSelectionInput()
+{
+    const ImGuiIO& io = ImGui::GetIO();
+
+    auto cancelGesture = [&]()
+    {
+        m_regionPickPending = false;
+        m_regionPickDragging = false;
+    };
+
+    const bool selectionMode =
+        m_renderer.debugVisualizationMode == 8 &&
+        !m_renderer.bypassUnionFind;
+
+    if (!selectionMode || m_framebufferResized)
+    {
+        m_renderer.clearRegionSelection();
+        cancelGesture();
+        return;
+    }
+
+    if (!io.WantCaptureKeyboard &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+    {
+        m_renderer.clearRegionSelection();
+        cancelGesture();
+        return;
+    }
+
+    // A gesture must start and finish outside ImGui.
+    if (io.WantCaptureMouse ||
+        glfwGetWindowAttrib(m_window, GLFW_FOCUSED) != GLFW_TRUE)
+    {
+        cancelGesture();
+        return;
+    }
+
+    // Panning or zooming invalidates the screen-space selection.
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Middle) ||
+        io.MouseWheel != 0.0f)
+    {
+        m_renderer.clearRegionSelection();
+        cancelGesture();
+        return;
+    }
+
+    double mouseX, mouseY;
+    glfwGetCursorPos(m_window, &mouseX, &mouseY);
+
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+    {
+        m_regionPickPending = true;
+        m_regionPickDragging = false;
+        m_regionPickStartX = mouseX;
+        m_regionPickStartY = mouseY;
+    }
+
+    if (!m_regionPickPending)
+        return;
+
+    // Once classified as a drag, returning to the press position
+    // must not turn the gesture back into a click.
+    const double moveX = mouseX - m_regionPickStartX;
+    const double moveY = mouseY - m_regionPickStartY;
+    constexpr double dragThreshold = 4.0;
+
+    if (moveX * moveX + moveY * moveY >
+        dragThreshold * dragThreshold)
+    {
+        m_regionPickDragging = true;
+        m_renderer.clearRegionSelection();
+    }
+
+    if (!ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+        return;
+
+    const bool wasClick = !m_regionPickDragging;
+    cancelGesture();
+
+    if (!wasClick)
+        return;
+
+    int windowWidth, windowHeight;
+    glfwGetWindowSize(m_window, &windowWidth, &windowHeight);
+
+    if (windowWidth <= 0 || windowHeight <= 0 ||
+        mouseX < 0.0 || mouseY < 0.0 ||
+        mouseX >= windowWidth || mouseY >= windowHeight)
+    {
+        return;
+    }
+
+    // Convert window coordinates to renderer pixel coordinates.
+    const int32_t pixelX = static_cast<int32_t>(std::floor(
+        mouseX * static_cast<double>(m_renderer.getWidth()) /
+        static_cast<double>(windowWidth)));
+
+    const int32_t pixelY = static_cast<int32_t>(std::floor(
+        mouseY * static_cast<double>(m_renderer.getHeight()) /
+        static_cast<double>(windowHeight)));
+
+    m_renderer.selectRegionAtPixel(pixelX, pixelY);
+}
+#endif
+
 void Application::updateCamera()
 {
     // Don't process camera input if ImGui wants the mouse
@@ -1020,8 +1155,18 @@ void Application::updateCamera()
     m_lastMouseX = mouseX;
     m_lastMouseY = mouseY;
 
+    // In selection mode, orbit only after crossing the drag threshold.
+    bool orbitAllowed = true;
+
+    #ifdef RENDER_METHOD_UNION_FIND
+    if (m_renderer.debugVisualizationMode == 8 && !m_renderer.bypassUnionFind)
+    {
+        orbitAllowed = m_regionPickPending && m_regionPickDragging;
+    }
+    #endif
+
     // Left mouse: orbit
-    if (glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
+    if (orbitAllowed && glfwGetMouseButton(m_window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS)
     {
         m_camera.yaw -= float(dx) * m_camera.orbitSpeed;
         m_camera.pitch += float(dy) * m_camera.orbitSpeed;
@@ -1102,6 +1247,12 @@ void Application::recreateSwapchain()
     }
 
     vkDeviceWaitIdle(m_context.device);
+
+    #ifdef RENDER_METHOD_UNION_FIND
+    m_renderer.clearRegionSelection();
+    m_regionPickPending = false;
+    m_regionPickDragging = false;
+    #endif
 
     m_swapchain.recreate(m_context, (uint32_t)w, (uint32_t)h);
 

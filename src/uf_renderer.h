@@ -42,7 +42,23 @@ public:
     uint32_t mergeMode = 0;  // 0 = balanced, 1 = color priority, 2 = space priority
 
 
-    int debugVisualizationMode = 4;  // -1 = normal peeling, 0-7 = debug visualization modes
+    int debugVisualizationMode = 4;  // -1 = normal peeling, 0-8 = debug visualization modes
+
+    struct RegionSelection {
+        int32_t pixelX = -1;
+        int32_t pixelY = -1;
+        bool active = false;
+    };
+
+    RegionSelection regionSelection;
+
+    void clearRegionSelection()
+    {
+        regionSelection = RegionSelection{};
+    }
+
+    void selectRegionAtPixel(int32_t x, int32_t y);
+
 
     float nearPlane = 0.1f;
     float farPlane = 100.0f;

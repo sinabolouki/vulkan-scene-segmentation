@@ -59,6 +59,11 @@ layout(push_constant) uniform PushConstants {
     float projX;
     float projY;
     float colorThreshold;
+    uint  mergeMode;
+
+    int   selectedPixelX;
+    int   selectedPixelY;
+    uint  selectionActive;
 };
 
 layout(location = 0) out vec4 outColor;
@@ -291,6 +296,83 @@ vec4 mode6Color(ivec2 coord) {
     return vec4(color, 1.0);
 }
 
+// Resolve a root without modifying the parent buffer.
+// Normally the paths are already compressed.
+uint selectionFindRoot(uint index, uint validCount) {
+    for (uint step = 0u; step < 64u; ++step) {
+        if (index >= validCount) return NULL_IDX;
+
+        uint next = parent[index];
+        if (next == index) return index;
+
+        index = next;
+    }
+
+    // Invalid chain or traversal bound reached.
+    return NULL_IDX;
+}
+
+vec4 selectionColor(ivec2 coord) {
+    const vec4 background = vec4(0.02, 0.02, 0.08, 1.0);
+
+    ivec2 extent = min(
+        ivec2(screenWidth, screenHeight),
+        imageSize(headPointerImage)
+    );
+
+    if (any(lessThan(coord, ivec2(0))) ||
+        any(greaterThanEqual(coord, extent))) {
+        return background;
+    }
+
+    // The allocation counter can exceed the actual buffer capacity.
+    uint validCount = min(
+        counter,
+        min(uint(nodes.length()), uint(parent.length()))
+    );
+
+    uint head = imageLoad(headPointerImage, coord).r;
+
+    // Show the original scene until a valid region has been selected.
+    vec4 preview = background;
+    if (head < validCount) {
+        preview = vec4(unpackColor(nodes[head].color).rgb, 1.0);
+    }
+
+    if (selectionActive == 0u) return preview;
+
+    ivec2 selectedCoord = ivec2(selectedPixelX, selectedPixelY);
+    if (any(lessThan(selectedCoord, ivec2(0))) ||
+        any(greaterThanEqual(selectedCoord, extent))) {
+        return preview;
+    }
+
+    // Pick the frontmost fragment at the clicked position.
+    uint selectedNode = imageLoad(
+        headPointerImage, selectedCoord
+    ).r;
+
+    uint selectedRoot = selectionFindRoot(selectedNode, validCount);
+
+    // Clicking empty space leaves the full scene visible.
+    if (selectedRoot == NULL_IDX) return preview;
+
+    // Lists are sorted front-to-back. Return the nearest fragment
+    // belonging to the selected region, including occluded fragments.
+    uint index = head;
+    for (uint visited = 0u;
+         visited < 32u && index < validCount;
+         ++visited) {
+        if (selectionFindRoot(index, validCount) == selectedRoot) {
+            return vec4(unpackColor(nodes[index].color).rgb, 1.0);
+        }
+
+        index = nodes[index].next;
+    }
+
+    return background;
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 void main() {
@@ -299,6 +381,11 @@ void main() {
     if (coord.x < 0 || coord.y < 0
         || coord.x >= int(screenWidth) || coord.y >= int(screenHeight)) {
         outColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
+    if (targetLayer == 8u) {
+        outColor = selectionColor(coord);
         return;
     }
 

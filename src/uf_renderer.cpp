@@ -1818,6 +1818,10 @@ void UFRenderer::recordDebugRegionsPhase(VkCommandBuffer cmd, uint32_t swapchain
     pc.projX = m_projX;
     pc.projY = m_projY;
     pc.colorThreshold = colorThreshold;
+    pc.mergeMode = mergeMode;
+    pc.selectedPixelX = regionSelection.pixelX;
+    pc.selectedPixelY = regionSelection.pixelY;
+    pc.selectionActive = (regionSelection.active && !bypassUnionFind) ? 1u : 0u;
     vkCmdPushConstants(cmd, m_fullscreenPipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
 
@@ -1895,4 +1899,19 @@ void UFRenderer::computeTimingResults()
     timingResults.composite = ms(compositeStart, compositeEnd);
 
     timingResults.total = ms(0, m_timestampCount - 1);
+}
+
+void UFRenderer::selectRegionAtPixel(int32_t x, int32_t y)
+{
+    if (x < 0 || y < 0 ||
+        static_cast<uint32_t>(x) >= m_width ||
+        static_cast<uint32_t>(y) >= m_height)
+    {
+        clearRegionSelection();
+        return;
+    }
+
+    regionSelection.pixelX = x;
+    regionSelection.pixelY = y;
+    regionSelection.active = true;
 }

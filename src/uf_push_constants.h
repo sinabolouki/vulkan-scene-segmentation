@@ -28,6 +28,10 @@ struct UFFullscreenPushConstants {
     float    projY;
     float    colorThreshold;
     uint32_t mergeMode;       // 0 = balanced, 1 = color priority, 2 = space priority
+
+    int32_t  selectedPixelX;
+    int32_t  selectedPixelY;
+    uint32_t selectionActive;  // 0 = inactive, 1 = active
 };
 
 // Push constants for composite pass
