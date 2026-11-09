@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <filesystem>
 
+#include <glm/gtc/color_space.hpp>
+
 namespace fs = std::filesystem;
 
 // Hash for deduplicating vertices
@@ -74,6 +76,13 @@ bool Scene::loadFromOBJ(const std::string &filepath)
     const auto &attrib = reader.GetAttrib();
     const auto &shapes = reader.GetShapes();
     const auto &materials = reader.GetMaterials();
+
+            // tinyobj fills attrib.colors with white for any "v" line without a color
+    // (vertex_color = true), so the array is never empty. Treat the file as
+    // vertex-colored only if some vertex actually carries a non-white color.
+    const bool hasVertexColors = std::any_of(attrib.colors.begin(), attrib.colors.end(),
+                                            [](tinyobj::real_t c) { return c != 1.0f; });
+    std::cout << "[Scene] Vertex colors: " << (hasVertexColors ? "yes" : "no") << std::endl;
 
     std::cout << "[Scene] Loading: " << filepath << std::endl;
     std::cout << "[Scene] Base dir: " << m_baseDir << std::endl;
@@ -153,9 +162,11 @@ bool Scene::loadFromOBJ(const std::string &filepath)
             }
 
             glm::vec3 faceDiffuse = glm::vec3(1.0f);
+            bool faceHasTexture = false;
             if (faceMaterialId >= 0 && faceMaterialId < (int)m_materials.size())
             {
                 faceDiffuse = m_materials[faceMaterialId].diffuseColor;
+                faceHasTexture = !m_materials[faceMaterialId].diffuseTexture.empty();
             }
             for (uint32_t v = 0; v < faceVerts; v++)
             {
@@ -182,11 +193,24 @@ bool Scene::loadFromOBJ(const std::string &filepath)
                     vertex.normal = {0.0f, 1.0f, 0.0f};
                 }
 
-                // Color: use material diffuse color (baked into vertex)
-                // vertex.color = glm::vec3(1.0f);
-                vertex.color = glm::vec3(attrib.colors[3 * idx.vertex_index + 0],attrib.colors[3 * idx.vertex_index + 1],
-                                         attrib.colors[3 * idx.vertex_index + 2]);
-                // vertex.color = faceDiffuse;  // Override with material diffuse color
+                // Color priority: real vertex colors > material Kd (untextured faces) > white.
+                // Textured faces stay white so Kd doesn't tint the texture (Sponza looks as it does now).
+                if (hasVertexColors)
+                {
+                    // OBJ vertex colors are sRGB-encoded; decode to linear to match the SRGB textures.
+                    vertex.color = glm::convertSRGBToLinear(glm::vec3(
+                        attrib.colors[3 * idx.vertex_index + 0],
+                        attrib.colors[3 * idx.vertex_index + 1],
+                        attrib.colors[3 * idx.vertex_index + 2]));
+                }
+                else if (!faceHasTexture)
+                {
+                    vertex.color = faceDiffuse;
+                }
+                else
+                {
+                    vertex.color = glm::vec3(1.0f);
+                }
 
                 // UV
                 if (idx.texcoord_index >= 0 && !attrib.texcoords.empty())
