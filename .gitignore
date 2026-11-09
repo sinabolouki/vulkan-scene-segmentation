@@ -253,3 +253,4 @@ python/inspect_out/
 /assets/*
 !/assets/Sponza/
 !/assets/Sponza/**/*.obj
+!/assets/furniture_scene/
