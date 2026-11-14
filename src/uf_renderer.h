@@ -4,14 +4,16 @@
 #include <glm/glm.hpp>
 #include <vector>
 #include <cstdint>
+#include <string>
 
 #include "texture_manager.h"
+#include "uf_evaluation.h"
 
 struct VulkanContext;
 class SwapchainManager;
 struct SceneObject;
 
-// GPU-side fragment node — must match GLSL layout exactly (28 bytes)
+// GPU-side fragment node — must match GLSL layout exactly (32 bytes)
 struct UFFragmentNode {
     uint32_t color;      // Packed RGBA8
     uint32_t unshadedColor; // Packed RGBA8 (unshaded, for color-based merging)
@@ -58,6 +60,20 @@ public:
     }
 
     void selectRegionAtPixel(int32_t x, int32_t y);
+
+    // One-shot CSV evaluation capture.
+    bool requestEvaluationExport(std::string filename);
+    bool isEvaluationExportPending() const
+    {
+        return !m_evaluationPath.empty();
+    }
+    const std::string& evaluationExportStatus() const
+    {
+        return m_evaluationStatus;
+    }
+    // Returns true when an export frame was processed.
+    bool finishEvaluationExport(VkDevice device, VkFence submittedFence);
+
 
 
     float nearPlane = 0.1f;
@@ -184,6 +200,28 @@ private:
 
     void computeTimingResults();
     void destroySizeDependent(VkDevice device);
+
+    struct EvaluationReadback {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkDeviceSize headsOffset = 0;
+        VkDeviceSize parentsOffset = 0;
+        VkDeviceSize nodesOffset = 0;
+        VkDeviceSize bytes = 0;
+        bool coherent = false;
+        bool recorded = false;
+        uf_eval::Metadata metadata;
+    };
+
+    EvaluationReadback m_evaluationReadback;
+    std::string m_evaluationPath;
+    std::string m_evaluationStatus = "No evaluation export yet.";
+
+    bool prepareEvaluationReadback(VulkanContext& context);
+    void recordEvaluationReadback(
+        VkCommandBuffer cmd, uint32_t mergeIterationCount);
+    void destroyEvaluationReadback(VkDevice device);
+
 
     // ═══════════════════════════════════════════════════════════
     // DIMENSIONS

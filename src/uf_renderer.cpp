@@ -134,7 +134,8 @@ bool UFRenderer::createDataStructures(VulkanContext &context)
         info.arrayLayers = 1;
         info.samples = VK_SAMPLE_COUNT_1_BIT;
         info.tiling = VK_IMAGE_TILING_OPTIMAL;
-        info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (vkCreateImage(context.device, &info, nullptr, &m_headPointerImage) != VK_SUCCESS)
@@ -162,7 +163,8 @@ bool UFRenderer::createDataStructures(VulkanContext &context)
     // Node buffer (SSBO)
     m_nodeCapacity = m_width * m_height * AVG_FRAGS_PER_PIXEL;
     if (!createBuffer(context, m_nodeCapacity * sizeof(UFFragmentNode),
-                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                       m_nodeBuffer, m_nodeBufferMemory))
         return false;
 
@@ -174,7 +176,9 @@ bool UFRenderer::createDataStructures(VulkanContext &context)
 
     // Parent buffer (one uint per node)
     if (!createBuffer(context, m_nodeCapacity * sizeof(uint32_t),
-                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                          VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                       m_parentBuffer, m_parentBufferMemory))
         return false;
 
@@ -981,6 +985,11 @@ uint32_t UFRenderer::findMemoryType(VkPhysicalDevice physDevice, uint32_t typeFi
 
 void UFRenderer::destroySizeDependent(VkDevice device)
 {
+    if (!m_evaluationPath.empty())
+        m_evaluationStatus = "Evaluation export canceled during resource recreation.";
+    destroyEvaluationReadback(device);
+    m_evaluationPath.clear();
+
     if (m_headPointerView)
     {
         vkDestroyImageView(device, m_headPointerView, nullptr);
@@ -1155,10 +1164,17 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
     m_projX = projection[0][0];
     m_projY = projection[1][1];
 
-    bool useDebugVis = (debugVisualizationMode >= 0);
+    const bool useDebugVis = (debugVisualizationMode >= 0);
+    const bool captureThisFrame =
+        !m_evaluationPath.empty() && prepareEvaluationReadback(context);
+    const bool measureThisFrame =
+        enableTiming && m_timestampQueryPool != VK_NULL_HANDLE &&
+        !useDebugVis && !captureThisFrame;
+    if (captureThisFrame)
+        timingResults = {};
 
     // ─── Read back previous frame's results ──────────────────────────────
-    if (enableTiming && !useDebugVis)
+    if (measureThisFrame)
     {
         readTimingResults(context.device);
     }
@@ -1193,14 +1209,14 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
     // ─── Reset timestamps ────────────────────────────────────────────────
     m_timestampCount = 0;
 
-    if (enableTiming && !useDebugVis)
+    if (measureThisFrame)
     {
         vkCmdResetQueryPool(cmd, m_timestampQueryPool, 0, MAX_TIMESTAMPS);
     }
 
     auto stamp = [&]()
     {
-        if (enableTiming && !useDebugVis && m_timestampCount < MAX_TIMESTAMPS)
+        if (measureThisFrame && m_timestampCount < MAX_TIMESTAMPS)
         {
             vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                                 m_timestampQueryPool, m_timestampCount++);
@@ -1270,6 +1286,9 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
     }
     stamp(); // [5] after merge (or placeholder if bypassed)
     stamp(); // [6] after compress (or placeholder if bypassed)
+
+    if (captureThisFrame)
+        recordEvaluationReadback(cmd, static_cast<uint32_t>(mergeIterations));
 
     // ═════════════════════════════════════════════════════════════════════
     // OUTPUT: Either debug visualization or peel+composite
@@ -1375,7 +1394,7 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
         stamp();
     }
 
-    m_timingReady = !useDebugVis;
+    m_timingReady = measureThisFrame;
 }
 // ═══════════════════════════════════════════════════════════════════════════════
 // PHASE 1: CLEAR
@@ -1914,4 +1933,221 @@ void UFRenderer::selectRegionAtPixel(int32_t x, int32_t y)
     regionSelection.pixelX = x;
     regionSelection.pixelY = y;
     regionSelection.active = true;
+}
+
+bool UFRenderer::requestEvaluationExport(std::string filename)
+{
+    if (isEvaluationExportPending()) return false;
+    if (bypassUnionFind) {
+        m_evaluationStatus = "Enable Union-Find before exporting.";
+        return false;
+    }
+    if (filename.empty()) {
+        m_evaluationStatus = "Evaluation filename is empty.";
+        return false;
+    }
+    m_evaluationPath = std::move(filename);
+    m_evaluationStatus = "Evaluation export requested.";
+    return true;
+}
+
+void UFRenderer::destroyEvaluationReadback(VkDevice device)
+{
+    if (m_evaluationReadback.buffer)
+        vkDestroyBuffer(device, m_evaluationReadback.buffer, nullptr);
+    if (m_evaluationReadback.memory)
+        vkFreeMemory(device, m_evaluationReadback.memory, nullptr);
+    m_evaluationReadback = {};
+}
+
+bool UFRenderer::prepareEvaluationReadback(VulkanContext& context)
+{
+    auto& snapshot = m_evaluationReadback;
+    try {
+        if (bypassUnionFind || m_nodeCapacity == 0 || m_width == 0 || m_height == 0)
+            throw std::runtime_error("No active Union-Find workload");
+        destroyEvaluationReadback(context.device);
+
+        static_assert(sizeof(UFFragmentNode) == 32, "GPU node layout mismatch");
+        const VkDeviceSize pixels = VkDeviceSize(m_width) * m_height;
+        snapshot.headsOffset = sizeof(uint32_t);
+        snapshot.parentsOffset =
+            snapshot.headsOffset + pixels * sizeof(uint32_t);
+        snapshot.nodesOffset = snapshot.parentsOffset
+            + VkDeviceSize(m_nodeCapacity) * sizeof(uint32_t);
+        snapshot.bytes = snapshot.nodesOffset
+            + VkDeviceSize(m_nodeCapacity) * sizeof(UFFragmentNode);
+
+        const auto requireSuccess = [](VkResult result, const char* operation) {
+            if (result != VK_SUCCESS)
+                throw std::runtime_error(
+                    std::string(operation) + " failed (" +
+                    std::to_string(static_cast<int>(result)) + ")");
+        };
+
+        VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        info.size = snapshot.bytes;
+        info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        requireSuccess(vkCreateBuffer(
+            context.device, &info, nullptr, &snapshot.buffer), "vkCreateBuffer");
+
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(
+            context.device, snapshot.buffer, &requirements);
+        VkPhysicalDeviceMemoryProperties properties{};
+        vkGetPhysicalDeviceMemoryProperties(context.physical_device, &properties);
+        int bestScore = -1;
+        uint32_t selectedType = 0;
+        for (uint32_t i = 0; i < properties.memoryTypeCount; ++i) {
+            const auto flags = properties.memoryTypes[i].propertyFlags;
+            if (!(requirements.memoryTypeBits & (1u << i)) ||
+                !(flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT))
+                continue;
+            const int score =
+                ((flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? 16 : 0) +
+                (!(flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? 4 : 0) +
+                ((flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) ? 2 : 0);
+            if (score > bestScore) {
+                bestScore = score;
+                selectedType = i;
+            }
+        }
+        if (bestScore < 0)
+            throw std::runtime_error("No host-visible readback memory type");
+        snapshot.coherent =
+            (properties.memoryTypes[selectedType].propertyFlags &
+             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+
+        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocation.allocationSize = requirements.size;
+        allocation.memoryTypeIndex = selectedType;
+        requireSuccess(vkAllocateMemory(
+            context.device, &allocation, nullptr, &snapshot.memory),
+            "vkAllocateMemory");
+        requireSuccess(vkBindBufferMemory(
+            context.device, snapshot.buffer, snapshot.memory, 0),
+            "vkBindBufferMemory");
+
+        snapshot.metadata.width = m_width;
+        snapshot.metadata.height = m_height;
+        snapshot.metadata.node_capacity = m_nodeCapacity;
+        snapshot.metadata.per_pixel_limit = MAX_FRAGS_PER_PIXEL;
+        snapshot.metadata.merge_mode = mergeMode;
+        snapshot.metadata.proximity_scale = proximityScale;
+        snapshot.metadata.plane_threshold = planeThreshold;
+        snapshot.metadata.color_threshold = colorThreshold;
+        return true;
+    }
+    catch (const std::exception& error) {
+        destroyEvaluationReadback(context.device);
+        m_evaluationPath.clear();
+        m_evaluationStatus = std::string("Evaluation export failed: ") + error.what();
+        return false;
+    }
+}
+
+void UFRenderer::recordEvaluationReadback(
+    VkCommandBuffer cmd, uint32_t mergeIterationCount)
+{
+    auto& snapshot = m_evaluationReadback;
+    snapshot.metadata.merge_iterations = mergeIterationCount;
+
+    // Include prior transfer clears as well as shader writes. Empty pixels may
+    // still contain the value produced by the transfer clear.
+    recordMemoryBarrier(cmd,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+
+    VkBufferCopy counterCopy{0, 0, sizeof(uint32_t)};
+    vkCmdCopyBuffer(cmd, m_atomicCounterBuffer, snapshot.buffer, 1, &counterCopy);
+
+    VkBufferImageCopy headsCopy{};
+    headsCopy.bufferOffset = snapshot.headsOffset;
+    headsCopy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    headsCopy.imageExtent = {m_width, m_height, 1};
+    vkCmdCopyImageToBuffer(
+        cmd, m_headPointerImage, VK_IMAGE_LAYOUT_GENERAL,
+        snapshot.buffer, 1, &headsCopy);
+
+    VkBufferCopy parentsCopy{
+        0, snapshot.parentsOffset,
+        VkDeviceSize(m_nodeCapacity) * sizeof(uint32_t)};
+    vkCmdCopyBuffer(cmd, m_parentBuffer, snapshot.buffer, 1, &parentsCopy);
+    VkBufferCopy nodesCopy{
+        0, snapshot.nodesOffset,
+        VkDeviceSize(m_nodeCapacity) * sizeof(UFFragmentNode)};
+    vkCmdCopyBuffer(cmd, m_nodeBuffer, snapshot.buffer, 1, &nodesCopy);
+
+    // Readback writes become visible to the host after the submitted fence.
+    // Extraction and subsequent clears must also follow the snapshot reads.
+    recordMemoryBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT |
+            VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT |
+            VK_ACCESS_TRANSFER_WRITE_BIT);
+    snapshot.recorded = true;
+}
+
+bool UFRenderer::finishEvaluationExport(VkDevice device, VkFence submittedFence)
+{
+    auto& snapshot = m_evaluationReadback;
+    if (!snapshot.recorded) return false;
+
+    // A failed fence wait is a rendering error: do not free resources that may
+    // still be in flight and then continue rendering.
+    if (vkWaitForFences(device, 1, &submittedFence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+        throw std::runtime_error("Failed to wait for evaluation capture");
+
+    void* mapped = nullptr;
+    try {
+        if (vkMapMemory(device, snapshot.memory, 0, VK_WHOLE_SIZE, 0, &mapped)
+            != VK_SUCCESS)
+            throw std::runtime_error("Could not map evaluation readback");
+        if (!snapshot.coherent) {
+            VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+            range.memory = snapshot.memory;
+            range.offset = 0;
+            range.size = VK_WHOLE_SIZE;
+            if (vkInvalidateMappedMemoryRanges(device, 1, &range) != VK_SUCCESS)
+                throw std::runtime_error("Could not invalidate evaluation memory");
+        }
+
+        const auto* bytes = static_cast<const std::byte*>(mapped);
+        uint32_t requests = 0;
+        std::memcpy(&requests, bytes, sizeof(requests));
+        snapshot.metadata.allocation_requests = requests;
+        const uint32_t stored = std::min(
+            requests, snapshot.metadata.node_capacity);
+        const auto* heads = reinterpret_cast<const uint32_t*>(
+            bytes + snapshot.headsOffset);
+        const auto* parents = reinterpret_cast<const uint32_t*>(
+            bytes + snapshot.parentsOffset);
+        const auto* nodes = reinterpret_cast<const UFFragmentNode*>(
+            bytes + snapshot.nodesOffset);
+        const auto analysis = uf_eval::analyze<UFFragmentNode>(
+            std::span<const UFFragmentNode>(nodes, stored),
+            std::span<const uint32_t>(parents, stored),
+            std::span<const uint32_t>(
+                heads, std::size_t(snapshot.metadata.width) *
+                    snapshot.metadata.height),
+            snapshot.metadata.per_pixel_limit);
+
+        const auto destination = std::filesystem::absolute(m_evaluationPath);
+        uf_eval::write_csv(destination, analysis, snapshot.metadata);
+        m_evaluationStatus = "Saved " + destination.string() + " (" +
+            std::to_string(analysis.retained) + " retained fragments).";
+    }
+    catch (const std::exception& error) {
+        m_evaluationStatus =
+            std::string("Evaluation export failed: ") + error.what();
+    }
+    if (mapped) vkUnmapMemory(device, snapshot.memory);
+    destroyEvaluationReadback(device);
+    m_evaluationPath.clear();
+    std::cout << "[UF evaluation] " << m_evaluationStatus << '\n';
+    return true; // An export frame was processed, including a failed CSV write.
 }

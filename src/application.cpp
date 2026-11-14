@@ -323,6 +323,22 @@ void Application::drawFrame()
     ImGui::Separator();
     ImGui::Checkbox("Bypass Union-Find (show front only)", &m_renderer.bypassUnionFind);
 
+    ImGui::Separator();
+    ImGui::BeginDisabled(
+        m_renderer.bypassUnionFind || m_renderer.isEvaluationExportPending());
+    if (ImGui::Button("Export grouping counts (CSV)"))
+    {
+        const auto timestamp =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto path = std::filesystem::path("results") / "evaluation" /
+            (m_screenshotSceneName + "_" + std::to_string(timestamp) + ".csv");
+        m_renderer.requestEvaluationExport(path.string());
+    }
+    ImGui::EndDisabled();
+    ImGui::TextWrapped("%s", m_renderer.evaluationExportStatus().c_str());
+
+
     // In your ImGui panel:
     ImGui::Separator();
     ImGui::Text("Debug Visualization");
@@ -487,6 +503,16 @@ void Application::drawFrame()
     // Only a requested screenshot waits here; ordinary frames keep their usual flow.
     if (m_screenshotBuffer != VK_NULL_HANDLE)
         finishScreenshot(inFlightFence);
+
+#ifdef RENDER_METHOD_UNION_FIND
+    if (m_renderer.finishEvaluationExport(m_context.device, inFlightFence))
+    {
+        m_lastFrameTime = std::chrono::high_resolution_clock::now();
+        m_fpsWindowStart = std::chrono::steady_clock::now();
+        m_fpsWindowFrames = 0;
+        m_avgFps1s = 0.0;
+    }
+#endif
 
     result = m_swapchain.present(m_context.present_queue, imageIndex, signalSemaphores[0]);
 
