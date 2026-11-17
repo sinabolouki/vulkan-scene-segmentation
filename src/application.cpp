@@ -75,6 +75,10 @@ bool Application::init(uint32_t width, uint32_t height, const std::string &title
         return false;
     }
     m_screenshotSceneName = std::filesystem::path(scenePath).stem().string();
+#ifdef RENDER_METHOD_UNION_FIND
+    m_scenePath = scenePath;
+    std::snprintf(m_captureSceneLabel, sizeof(m_captureSceneLabel), "%s", m_screenshotSceneName.c_str());
+#endif
 
     // One camera file per OBJ; an absolute path also survives working-directory changes.
     std::error_code cameraPathError;
@@ -165,7 +169,11 @@ void Application::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex)
     m_renderer.recordCommands(cmd, m_context, m_swapchain,
                               m_vertexBuffer, m_indexBuffer,
                               m_scene.getObjects(),
-                              viewProj, view, proj, imageIndex);
+                              viewProj, view, proj, imageIndex
+#ifdef RENDER_METHOD_UNION_FIND
+                              , m_currentFrame, m_applicationFrameId
+#endif
+                              );
 #endif
 
     // Capture the completed scene while it still contains no ImGui pixels.
@@ -189,6 +197,11 @@ void Application::drawFrame()
     m_frameTimeMs = std::chrono::duration<double, std::milli>(now - m_lastFrameTime).count();
     m_fps = 1000.0 / m_frameTimeMs;
     m_lastFrameTime = now;
+
+#ifdef RENDER_METHOD_UNION_FIND
+    pollPerformanceResults();
+    exportFinishedPerformanceCapture();
+#endif
 
 #ifdef RENDER_METHOD_SAM2
     // Collect finished results / health check (cheap, non-blocking)
@@ -215,7 +228,10 @@ void Application::drawFrame()
 
     // ─── ImGui UI ───
 #ifdef RENDER_METHOD_UNION_FIND
+    drawPerformancePanel();
     ImGui::Begin("Union-Find Renderer");
+    // A capture has one immutable configuration, including during warm-up.
+    ImGui::BeginDisabled(m_performanceCapture.active());
 
     ImGui::Separator();
     const char *mergeModes[] = {
@@ -236,6 +252,10 @@ void Application::drawFrame()
             "Mode 2: Spatial checked first — if geometry says different,\n"
             "        fragments are never merged regardless of color.");
     }
+
+    int mergeIterations = static_cast<int>(m_renderer.mergeIterations);
+    if (ImGui::SliderInt("Merge-compression iterations", &mergeIterations, 1, 8))
+        m_renderer.mergeIterations = static_cast<uint32_t>(mergeIterations);
 
     // ─── Connectivity Parameters ───
     ImGui::Text("Connectivity Parameters");
@@ -272,7 +292,7 @@ void Application::drawFrame()
     ImGui::Text("Camera Pitch: %.2f, Yaw: %.2f", m_camera.pitch, m_camera.yaw);
     ImGui::Separator();
 
-    if (m_renderer.enableTiming)
+    if (m_renderer.enableTiming && m_renderer.isTimingReady())
     {
         auto &t = m_renderer.timingResults;
         ImGui::Text("GPU Timing (ms):");
@@ -281,8 +301,7 @@ void Application::drawFrame()
         ImGui::Text("  Collect:      %6.3f", t.collect);
         ImGui::Text("  Sort:         %6.3f", t.sort);
         ImGui::Text("  Init Parents: %6.3f", t.initParents);
-        ImGui::Text("  Merge:        %6.3f", t.merge);
-        ImGui::Text("  Compress:     %6.3f", t.compress);
+        ImGui::Text("  Grouping:     %6.3f", t.grouping);
         ImGui::Separator();
 
         for (uint32_t i = 0; i < m_renderer.NUM_LAYERS; i++)
@@ -290,7 +309,7 @@ void Application::drawFrame()
             if (ImGui::TreeNode((void *)(intptr_t)i, "Peel %d: %6.3f ms", i, t.peels[i].total))
             {
                 ImGui::Text("  Clear Table: %6.3f", t.peels[i].clearTable);
-                ImGui::Text("  Register:    %6.3f", t.peels[i].registerRoots);
+                ImGui::Text("  Register/min:%6.3f", t.peels[i].registerRoots);
                 ImGui::Text("  Resolve:     %6.3f", t.peels[i].resolve);
                 ImGui::TreePop();
             }
@@ -387,7 +406,7 @@ void Application::drawFrame()
     }
 
     ImGui::Separator();
-    ImGui::Text("GPU Debug Info (Peel Layer 0):");
+    ImGui::Text("GPU Debug Info (last extraction iteration):");
     ImGui::Text("  Min maxPosition:   %u", m_renderer.debugGPUInfo.minMaxPos);
     ImGui::Text("  Registered roots:  %u / %u", m_renderer.debugGPUInfo.numRegisteredRoots, UFRenderer::MAX_GLOBAL_ROOTS);
 
@@ -413,6 +432,7 @@ void Application::drawFrame()
         ImGui::Text("Near/Far: %.3f / %.1f", m_renderer.nearPlane, m_renderer.farPlane);
     }
 
+    ImGui::EndDisabled();
     ImGui::End();
 #elif defined(RENDER_METHOD_PPLL)
     ImGui::Begin("PPLL Renderer");
@@ -452,6 +472,11 @@ void Application::drawFrame()
 
     VkFence inFlightFence = m_swapchain.getInFlightFence(m_currentFrame);
     vkWaitForFences(m_context.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+#ifdef RENDER_METHOD_UNION_FIND
+    // Existing frame-slot wait; no measurement-specific blocking is added.
+    pollPerformanceResults();
+    exportFinishedPerformanceCapture();
+#endif
 
     uint32_t imageIndex;
     VkResult result = vkAcquireNextImageKHR(
@@ -461,6 +486,9 @@ void Application::drawFrame()
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR)
     {
+#ifdef RENDER_METHOD_UNION_FIND
+        m_performanceCapture.markGpuUnavailable(m_applicationFrameId, "swapchain_acquire_out_of_date");
+#endif
         ImGui::Render(); // close the ImGui frame we already started
         recreateSwapchain();
         return;
@@ -499,6 +527,10 @@ void Application::drawFrame()
         destroyScreenshotBuffer();
         throw std::runtime_error("Failed to submit command buffer");
     }
+
+#ifdef RENDER_METHOD_UNION_FIND
+    m_renderer.frameSubmitted(m_currentFrame);
+#endif
 
     // Only a requested screenshot waits here; ordinary frames keep their usual flow.
     if (m_screenshotBuffer != VK_NULL_HANDLE)
@@ -552,6 +584,9 @@ void Application::keyCallback(GLFWwindow *window, int key, int scancode, int act
 
     auto app = reinterpret_cast<Application *>(glfwGetWindowUserPointer(window));
 
+#ifdef RENDER_METHOD_UNION_FIND
+    if (app->m_performanceCapture.active()) return; // Lock display shortcuts too.
+#endif
     // Inside keyCallback:
 
     if (action == GLFW_PRESS || action == GLFW_REPEAT)
@@ -589,10 +624,24 @@ void Application::run()
     m_fpsWindowFrames = 0;
     while (!glfwWindowShouldClose(m_window))
     {
+#ifdef RENDER_METHOD_UNION_FIND
+        // Benchmark intervals use their own monotonic clock; preserve the
+        // existing UI timer and evaluation-export hooks that reset that timer.
+        const auto frameStart = performance::Clock::now();
+        m_performanceCapture.onFrameStart(m_applicationFrameId, frameStart);
+#endif
         glfwPollEvents();
         drawFrame();
+#ifdef RENDER_METHOD_UNION_FIND
+        ++m_applicationFrameId;
+#endif
     }
-    vkDeviceWaitIdle(m_context.device);
+    vkDeviceWaitIdle(m_context.device); // Existing shutdown wait, not a capture wait.
+#ifdef RENDER_METHOD_UNION_FIND
+    pollPerformanceResults();
+    m_performanceCapture.finishOnShutdown();
+    exportFinishedPerformanceCapture();
+#endif
 }
 
 void Application::cleanup()
@@ -726,7 +775,11 @@ uint32_t Application::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags 
 void Application::drawScreenshotPanel()
 {
     ImGui::Begin("Screenshots", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::BeginDisabled(!m_swapchain.supportsScreenshots() || m_screenshotRequested);
+    ImGui::BeginDisabled(!m_swapchain.supportsScreenshots() || m_screenshotRequested
+#ifdef RENDER_METHOD_UNION_FIND
+                         || m_performanceCapture.active()
+#endif
+                         );
     if (ImGui::Button("Save scene as PNG"))
         m_screenshotRequested = true;
     ImGui::EndDisabled();
@@ -1159,6 +1212,9 @@ void Application::updateRegionSelectionInput()
 
 void Application::updateCamera()
 {
+#ifdef RENDER_METHOD_UNION_FIND
+    if (m_freezeCamera) { m_firstMouse = true; return; }
+#endif
     // Don't process camera input if ImGui wants the mouse
     if (ImGui::GetIO().WantCaptureMouse)
     {
@@ -1263,6 +1319,10 @@ bool Application::loadTextures()
 
 void Application::recreateSwapchain()
 {
+#ifdef RENDER_METHOD_UNION_FIND
+    // Never continue one capture with a different extent or presentation mode.
+    m_performanceCapture.interrupt("interrupted_by_swapchain_recreation");
+#endif
     // Minimized window: wait until it has a real size again (fix #5)
     int w = 0, h = 0;
     glfwGetFramebufferSize(m_window, &w, &h);
@@ -1273,6 +1333,9 @@ void Application::recreateSwapchain()
     }
 
     vkDeviceWaitIdle(m_context.device);
+#ifdef RENDER_METHOD_UNION_FIND
+    pollPerformanceResults();
+#endif
 
     #ifdef RENDER_METHOD_UNION_FIND
     m_renderer.clearRegionSelection();
@@ -1719,3 +1782,236 @@ void Application::drawEvaluationTable()
                         "Matches >0.5: one-to-one region/mask pairs with IoU > 0.5 (mean IoU).");
 }
 #endif // RENDER_METHOD_SAM2
+
+
+#ifdef RENDER_METHOD_UNION_FIND
+namespace {
+const char* presentModeName(VkPresentModeKHR mode) {
+    switch (mode) {
+    case VK_PRESENT_MODE_IMMEDIATE_KHR: return "IMMEDIATE";
+    case VK_PRESENT_MODE_MAILBOX_KHR: return "MAILBOX";
+    case VK_PRESENT_MODE_FIFO_KHR: return "FIFO";
+    case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "FIFO_RELAXED";
+    default: return "OTHER";
+    }
+}
+}
+
+void Application::pollPerformanceResults()
+{
+    for (uint32_t slot = 0; slot < SwapchainManager::MAX_FRAMES_IN_FLIGHT; ++slot) {
+        const VkResult status = vkGetFenceStatus(m_context.device, m_swapchain.getInFlightFence(slot));
+        if (status == VK_SUCCESS) {
+            if (auto result = m_renderer.resolveCompletedFrame(m_context.device, slot))
+                m_performanceCapture.acceptGpuResult(std::move(*result));
+        } else if (status != VK_NOT_READY) {
+            throw std::runtime_error("Failed to inspect frame fence during performance capture");
+        }
+    }
+}
+
+void Application::exportFinishedPerformanceCapture()
+{
+    // Ready means the last outgoing frame interval AND all delayed GPU results
+    // have been retired. File I/O cannot contaminate any captured interval.
+    if (m_performanceCapture.ready())
+        m_performanceCapture.exportCsv(m_captureOutputDirectory);
+    m_renderer.setPerformanceCaptureActive(m_performanceCapture.active());
+}
+
+performance::Metadata Application::performanceMetadata()
+{
+    glm::mat4 view, projection;
+    computeCameraMatrices(view, projection); // Update the actual near/far values.
+    VkPhysicalDeviceProperties gpu{};
+    vkGetPhysicalDeviceProperties(m_context.physical_device, &gpu);
+    const auto extent = m_swapchain.getExtent();
+    performance::Metadata result;
+    auto add = [&](const std::string& key, const std::string& value) { result.emplace_back(key, value); };
+    auto val = [&](const std::string& key, auto value) { add(key, performance::number(value)); };
+    add("scene_path", m_scenePath);
+    val("width", extent.width); val("height", extent.height);
+    add("build_configuration", m_captureBuildConfiguration);
+#ifdef THESIS_BUILD_CONFIGURATION
+    add("build_configuration_source", "CMake generator expression");
+#else
+    add("build_configuration_source", "user-entered exact configuration");
+#endif
+#ifdef NDEBUG
+    val("ndebug", 1);
+#else
+    val("ndebug", 0);
+#endif
+#ifdef THESIS_COMPILER_ID
+    add("compiler", THESIS_COMPILER_ID);
+#endif
+#ifdef THESIS_SOURCE_REVISION
+    add("source_revision", THESIS_SOURCE_REVISION);
+#endif
+#ifdef _WIN32
+    add("operating_system", "Windows");
+#elif defined(__linux__)
+    add("operating_system", "Linux");
+#else
+    add("operating_system", "Other");
+#endif
+    add("gpu", gpu.deviceName);
+    val("gpu_vendor_id", gpu.vendorID); val("gpu_device_id", gpu.deviceID);
+    val("gpu_driver_version_raw", gpu.driverVersion); val("vulkan_api_version_raw", gpu.apiVersion);
+    val("graphics_queue_family", m_context.graphics_queue_family);
+    val("timestamp_valid_bits", m_renderer.timestampValidBits());
+    val("timestamp_period_ns", m_renderer.timestampPeriodNs());
+    val("timestamps_supported", m_renderer.timestampsSupported() ? 1 : 0);
+    val("gpu_timing_enabled", m_renderer.enableTiming ? 1 : 0);
+    val("frames_in_flight", SwapchainManager::MAX_FRAMES_IN_FLIGHT);
+    add("present_mode", presentModeName(m_swapchain.getPresentMode()));
+    val("present_mode_raw", static_cast<int>(m_swapchain.getPresentMode()));
+    // MAILBOX synchronizes display updates without FIFO-style producer pacing.
+    // Record the mode as authoritative instead of pretending all sync modes
+    // are equivalent to an application FPS cap.
+    add("vsync", m_swapchain.getPresentMode() == VK_PRESENT_MODE_IMMEDIATE_KHR ? "off" :
+        m_swapchain.getPresentMode() == VK_PRESENT_MODE_FIFO_KHR ? "on (FIFO)" :
+        m_swapchain.getPresentMode() == VK_PRESENT_MODE_MAILBOX_KHR ? "synchronized display; producer not FIFO-paced (MAILBOX)" :
+        m_swapchain.getPresentMode() == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? "adaptive; tearing permitted when late (FIFO_RELAXED)" : "unknown; see present_mode_raw");
+    val("application_fps_cap_hz", 0);
+    add("application_fps_cap_source", "none in Application::run; external driver/compositor overrides unknown");
+    val("swapchain_image_count", m_swapchain.getImageCount());
+    val("camera_frozen", m_freezeCamera ? 1 : 0);
+    val("camera_position_x", m_camera.position.x); val("camera_position_y", m_camera.position.y);
+    val("camera_position_z", m_camera.position.z);
+    val("camera_target_x", m_camera.target.x); val("camera_target_y", m_camera.target.y);
+    val("camera_target_z", m_camera.target.z);
+    val("camera_up_x", m_camera.up.x); val("camera_up_y", m_camera.up.y); val("camera_up_z", m_camera.up.z);
+    val("camera_yaw_radians", m_camera.yaw); val("camera_pitch_radians", m_camera.pitch);
+    val("camera_distance", m_camera.distance); val("vertical_fov_degrees", 45.0);
+    val("near_plane", m_renderer.nearPlane); val("far_plane", m_renderer.farPlane);
+    val("merge_mode", m_renderer.mergeMode);
+    add("merge_mode_name", m_renderer.mergeMode == 0 ? "balanced" :
+        (m_renderer.mergeMode == 1 ? "color_priority" : "space_priority"));
+    add("color_metric", "weighted YCoCg on quantized unshaded RGB; compiled in uf_merge.frag");
+    val("color_luma_weight", 0.25);
+    val("color_threshold", m_renderer.colorThreshold);
+    val("proximity_scale", m_renderer.proximityScale);
+    val("plane_threshold", m_renderer.planeThreshold);
+    val("merge_compression_iterations", m_renderer.mergeIterations);
+    val("bypass_union_find", m_renderer.bypassUnionFind ? 1 : 0);
+    val("extraction_iterations", UFRenderer::NUM_LAYERS);
+    val("display_layer", m_renderer.debugDisplayLayer);
+    val("debug_visualization_mode", m_renderer.debugVisualizationMode);
+    // These are the constants in the uploaded shader; this feature does not
+    // change the grouping algorithm or silently substitute newer variants.
+    val("shader_rank_window", 8); val("shader_max_find_iterations", 64);
+    val("shader_cost_threshold", 1.0); val("shader_veto_threshold", 0.7);
+    val("shader_accept_threshold", 0.0);
+    val("shader_weight_plane", 0.25); val("shader_weight_normal", 0.25);
+    val("shader_weight_depth", 0.25); val("shader_weight_color", 0.25);
+    val("node_pool_capacity", m_renderer.getNodeBufferCapacity());
+    val("node_stride_bytes", sizeof(UFFragmentNode));
+    val("average_fragments_per_pixel_allocation", UFRenderer::AVG_FRAGS_PER_PIXEL);
+    val("per_pixel_retention_limit", UFRenderer::MAX_FRAGS_PER_PIXEL);
+    add("allocation_requests_definition", "collect atomicAdd calls after alpha-test; includes failed node allocations; 32-bit counter must not wrap");
+    add("stored_fragments_definition", "min(allocation_requests,node_pool_capacity), before per-pixel sorting/truncation");
+    add("node_pool_overflow_definition", "max(allocation_requests-node_pool_capacity,0); exactly full is not overflow");
+    add("retained_fragments_definition", "reachable fragments after uf_sort per-pixel truncation; NA: no per-frame counter; available in separate one-shot evaluation");
+    add("per_pixel_retention_losses_definition", "stored_fragments-retained_fragments; NA: no per-frame counter; independent of node-pool overflow");
+    add("fragment_evaluation_export", "preserved as a separate one-shot operation; blocked during warm-up, measurement and draining");
+    add("retention_diagnostics_source", "one-shot uf_eval analysis is available separately; full snapshots and synchronous export are excluded from timing captures");
+    add("grouping_gpu_ms_boundary", "timestamp after parent initialization barrier to timestamp after final compression barrier; all iterations");
+    add("renderer_gpu_ms_boundary", "timestamp immediately before recordClearPhase to timestamp immediately after recordCompositePhase");
+    add("renderer_gpu_ms_includes", "resource clears/transitions, collect, sort, parent initialization, all grouping iterations, all 16 extraction iterations, final composite, internal barriers and timestamp commands");
+    val("renderer_gpu_ms_includes_imgui", 0);
+    add("renderer_gpu_ms_excludes", "query-pool reset, prior-frame shared-resource dependency, diagnostic transfers, screenshots, ImGui, host acquire/present calls and host work");
+    add("gpu_interval_interpretation", "elapsed between markers; pipeline bubbles and GPU semaphore waits inside the path may contribute");
+    add("timestamp_pipeline_stage", "TOP_OF_PIPE at renderer start; BOTTOM_OF_PIPE at dependent pass ends, on the graphics queue");
+    add("gpu_result_retrieval", "nonblocking 64-bit queries with availability after source-slot fence signalled; no WAIT_BIT");
+    add("pass_timing_note", "pass intervals include their following barriers; extraction includes its initial clears; register UI timing includes find-min");
+    val("validation_layers_requested", 1); // Existing VulkanContext requests layers in every build.
+    return result;
+}
+
+void Application::drawPerformancePanel()
+{
+    auto& capture = m_performanceCapture;
+    m_renderer.setPerformanceCaptureActive(capture.active());
+    ImGui::Begin("Performance capture");
+    ImGui::BeginDisabled(capture.active());
+    ImGui::InputText("Scene label", m_captureSceneLabel, sizeof(m_captureSceneLabel));
+    ImGui::InputText("Camera pose label", m_capturePoseLabel, sizeof(m_capturePoseLabel));
+#ifdef THESIS_BUILD_CONFIGURATION
+    ImGui::Text("Build configuration: %s", m_captureBuildConfiguration);
+#else
+    ImGui::InputText("Actual build configuration", m_captureBuildConfiguration, sizeof(m_captureBuildConfiguration));
+    ImGui::TextWrapped("Enter the configuration you built, or enable the supplied CMake metadata helper.");
+#endif
+    ImGui::InputText("Output directory", m_captureOutputDirectory, sizeof(m_captureOutputDirectory));
+    ImGui::InputFloat("Warm-up seconds", &m_captureWarmupSeconds, 1.0f, 10.0f, "%.1f");
+    if (!std::isfinite(m_captureWarmupSeconds)) m_captureWarmupSeconds = 30.0f;
+    m_captureWarmupSeconds = std::clamp(m_captureWarmupSeconds, 0.0f, 3600.0f);
+    ImGui::InputInt("Measured frames", &m_captureSampleCount);
+    m_captureSampleCount = std::clamp(m_captureSampleCount, 1, 1000000);
+    ImGui::Checkbox("Freeze camera", &m_freezeCamera);
+    if (ImGui::Button("Apply initial benchmark settings")) {
+        m_renderer.mergeMode = 0;
+        m_renderer.colorThreshold = 0.05f;
+        m_renderer.proximityScale = 0.7f;
+        m_renderer.planeThreshold = 1.5f;
+        m_renderer.mergeIterations = 2;
+        m_renderer.debugVisualizationMode = -1;
+        m_renderer.debugDisplayLayer = -1;
+        m_renderer.bypassUnionFind = false;
+        m_renderer.enableTiming = true;
+        m_renderer.clearRegionSelection();
+    }
+    ImGui::EndDisabled();
+    const bool validPath = m_renderer.debugVisualizationMode == -1 &&
+        m_renderer.debugDisplayLayer == -1 && !m_renderer.bypassUnionFind;
+    const bool labelled = m_captureSceneLabel[0] && m_capturePoseLabel[0] && m_captureBuildConfiguration[0];
+    const bool evaluationPending = m_renderer.isEvaluationExportPending();
+    ImGui::BeginDisabled(capture.active() || evaluationPending || !m_freezeCamera ||
+                         !validPath || !labelled || !m_renderer.enableTiming);
+    if (ImGui::Button("Start capture")) {
+        m_screenshotRequested = false;
+        capture.start(m_captureWarmupSeconds, static_cast<size_t>(m_captureSampleCount),
+                      m_captureSceneLabel, m_capturePoseLabel, performanceMetadata(), performance::Clock::now());
+        m_renderer.setPerformanceCaptureActive(true);
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(capture.state() != performance::Capture::State::Warmup &&
+                         capture.state() != performance::Capture::State::Sampling);
+    if (ImGui::Button("Stop and export")) capture.stop();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!capture.active());
+    if (ImGui::Button("Cancel capture")) {
+        capture.cancel();
+        m_renderer.setPerformanceCaptureActive(false);
+    }
+    ImGui::EndDisabled();
+    if (capture.exportFailed() && ImGui::Button("Retry export"))
+        capture.exportCsv(m_captureOutputDirectory);
+    ImGui::Text("Resolution: %u x %u; extraction budget: %u", m_swapchain.getExtent().width,
+                m_swapchain.getExtent().height, UFRenderer::NUM_LAYERS);
+    ImGui::TextUnformatted("GPU timing excludes ImGui. Application frame intervals include normal pacing.");
+    if (!m_freezeCamera) ImGui::TextUnformatted("Freeze the camera before starting.");
+    if (!validPath) ImGui::TextUnformatted("Select Normal Rendering and Composite, and disable bypass.");
+    if (evaluationPending) ImGui::TextUnformatted("Finish the pending fragment-evaluation export before starting capture.");
+    if (!m_renderer.timestampsSupported())
+        ImGui::TextUnformatted("GPU timestamps unavailable: GPU timing fields will be NA.");
+    using State = performance::Capture::State;
+    switch (capture.state()) {
+    case State::Warmup:
+        ImGui::Text("Warm-up: %.1f seconds remaining", capture.warmupRemaining(performance::Clock::now()));
+        break;
+    case State::Sampling:
+        ImGui::Text("Measuring: %zu / %zu frames", capture.sampleCount(), capture.targetCount());
+        break;
+    case State::Draining:
+        ImGui::Text("Finishing %zu frames; %zu GPU results pending", capture.sampleCount(), capture.pendingGpuCount());
+        break;
+    default: break;
+    }
+    if (!capture.status().empty()) ImGui::TextWrapped("%s", capture.status().c_str());
+    ImGui::End();
+}
+#endif

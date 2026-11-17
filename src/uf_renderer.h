@@ -8,6 +8,8 @@
 
 #include "texture_manager.h"
 #include "uf_evaluation.h"
+#include "performance_capture.h"
+#include <array>
 
 struct VulkanContext;
 class SwapchainManager;
@@ -41,6 +43,7 @@ public:
     float proximityScale = 0.7f;
     float colorThreshold = 0.05f;
     int debugDisplayLayer = -1;
+    uint32_t mergeIterations = 2;
     uint32_t mergeMode = 0;  // 0 = balanced, 1 = color priority, 2 = space priority
 
 
@@ -86,8 +89,7 @@ public:
         float collect = 0;
         float sort = 0;
         float initParents = 0;
-        float merge = 0;
-        float compress = 0;
+        float grouping = 0; // All merge-compression iterations and their barriers.
         float peelTotal = 0;
         struct PeelTiming {
             float clearTable = 0;
@@ -118,7 +120,16 @@ public:
     DebugGPUInfo debugGPUInfo;
 
     bool isTimingReady() const { return m_timingReady; }
-    void readTimingResults(VkDevice device);
+    // Call only after this flight slot's submission fence has signalled.
+    // No query WAIT flag, no extra fence/device/queue waits.
+    std::optional<performance::GpuFrameResult> resolveCompletedFrame(VkDevice device, uint32_t slot);
+    void frameSubmitted(uint32_t slot) { m_profileFrames.at(slot).pending = true; }
+    bool timestampsSupported() const { return m_timestampQueryPool != VK_NULL_HANDLE; }
+    uint32_t timestampValidBits() const { return m_timestampValidBits; }
+    double timestampPeriodNs() const { return m_timestampPeriod; }
+
+    // Exclude the heavyweight, synchronous evaluation export while benchmarking.
+    void setPerformanceCaptureActive(bool active) { m_performanceCaptureActive = active; }
 
     // ─── Texture Manager ───
     void setTextureManager(TextureManager* texMgr) { m_textureManager = texMgr; }
@@ -137,7 +148,8 @@ public:
                         const glm::mat4& viewProj,
                         const glm::mat4& view,
                         const glm::mat4& projection,
-                        uint32_t swapchainImageIndex);
+                        uint32_t swapchainImageIndex,
+                        uint32_t frameSlot, uint64_t applicationFrameId);
 
     // ─── Debug Info ───
     uint32_t getNodeBufferCapacity() const { return m_nodeCapacity; }
@@ -198,7 +210,8 @@ private:
     uint32_t findMemoryType(VkPhysicalDevice physDevice, uint32_t typeFilter,
                             VkMemoryPropertyFlags properties);
 
-    void computeTimingResults();
+    bool createProfilingResources(VulkanContext& context);
+    void destroyProfilingResources(VkDevice device);
     void destroySizeDependent(VkDevice device);
 
     struct EvaluationReadback {
@@ -348,19 +361,26 @@ private:
     // TIMESTAMPING
     // ═══════════════════════════════════════════════════════════
 
-    VkQueryPool m_timestampQueryPool = VK_NULL_HANDLE;
-    float       m_timestampPeriod = 0.0f;
-    uint64_t    m_timestamps[MAX_TIMESTAMPS] = {};
-    uint32_t    m_timestampCount = 0;
-    bool        m_timingReady = false;
-
-    VkBuffer       m_counterStagingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory m_counterStagingMemory = VK_NULL_HANDLE;
-    void*          m_counterStagingMapped = nullptr;  // Persistently mapped
+    struct ProfileFrame {
+        VkBuffer readbackBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory readbackMemory = VK_NULL_HANDLE;
+        void* mapped = nullptr; // Host-visible, coherent; read only after fence.
+        uint64_t frameId = 0;
+        uint32_t nodeCapacity = 0;
+        uint32_t timestampCount = 0;
+        bool pending = false;
+        bool timed = false;
+        bool layered = false;
+        bool grouping = false;
+        bool evaluationExport = false;
+    };
+    bool m_performanceCaptureActive = false;
+    std::vector<ProfileFrame> m_profileFrames; // One per normal frame in flight.
+    VkQueryPool m_timestampQueryPool = VK_NULL_HANDLE; // Disjoint slot ranges.
+    double m_timestampPeriod = 0.0;
+    uint32_t m_timestampValidBits = 0;
+    bool m_timingReady = false;
 
     VkBuffer       m_debugInfoBuffer        = VK_NULL_HANDLE;
     VkDeviceMemory m_debugInfoMemory        = VK_NULL_HANDLE;
-    VkBuffer       m_debugInfoStagingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory m_debugInfoStagingMemory = VK_NULL_HANDLE;
-    void*          m_debugInfoStagingMapped = nullptr;
 };

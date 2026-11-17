@@ -21,6 +21,7 @@ public:
     VkSwapchainKHR getSwapchain() const { return m_swapchain; }
     VkRenderPass getRenderPass() const { return m_renderPass; }
     VkFramebuffer getFramebuffer(uint32_t index) const { return m_framebuffers[index]; }
+    VkPresentModeKHR getPresentMode() const { return m_presentMode; }
     VkExtent2D getExtent() const { return m_extent; }
     VkFormat getImageFormat() const { return m_imageFormat; }
     VkFormat getDepthFormat() const { return m_depthFormat; }
@@ -56,6 +57,7 @@ private:
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     VkFormat m_imageFormat = VK_FORMAT_UNDEFINED;
     bool m_screenshotsSupported = false;
+    VkPresentModeKHR m_presentMode = VK_PRESENT_MODE_FIFO_KHR;
     VkExtent2D m_extent = {0, 0};
     std::vector<VkImage> m_images;
     std::vector<VkImageView> m_imageViews;

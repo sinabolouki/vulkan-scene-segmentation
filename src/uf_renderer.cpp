@@ -9,6 +9,10 @@
 #include <iostream>
 #include <array>
 #include <cstring>
+#include <cstddef>
+#include <filesystem>
+#include <span>
+#include <stdexcept>
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INIT / DESTROY / RECREATE
@@ -40,18 +44,8 @@ bool UFRenderer::init(VulkanContext &context, SwapchainManager &swapchain)
     if (!createPipelines(context.device))
         return false;
 
-    if (enableTiming)
-    {
-        VkQueryPoolCreateInfo qpInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-        qpInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        qpInfo.queryCount = MAX_TIMESTAMPS;
-        vkCreateQueryPool(context.device, &qpInfo, nullptr, &m_timestampQueryPool);
-
-        // Get timestamp period (nanoseconds per tick)
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(context.physical_device, &props);
-        m_timestampPeriod = props.limits.timestampPeriod;
-    }
+    if (!createProfilingResources(context))
+        return false;
 
     std::cout << "[UF] Initialized: " << m_width << "x" << m_height
               << ", " << NUM_LAYERS << " layers, "
@@ -93,8 +87,7 @@ void UFRenderer::destroy(VkDevice device)
     vkDestroyRenderPass(device, m_layerRenderPass, nullptr);
     vkDestroyRenderPass(device, m_compositeRenderPass, nullptr);
 
-    if (m_timestampQueryPool)
-        vkDestroyQueryPool(device, m_timestampQueryPool, nullptr);
+    destroyProfilingResources(device);
 
     destroySizeDependent(device);
 }
@@ -194,30 +187,6 @@ bool UFRenderer::createDataStructures(VulkanContext &context)
                       m_globalMinBuffer, m_globalMinMemory))
         return false;
 
-    {
-        VkBufferCreateInfo bufInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bufInfo.size = sizeof(uint32_t);
-        bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-        if (vkCreateBuffer(context.device, &bufInfo, nullptr, &m_counterStagingBuffer) != VK_SUCCESS)
-            return false;
-
-        VkMemoryRequirements memReq;
-        vkGetBufferMemoryRequirements(context.device, m_counterStagingBuffer, &memReq);
-
-        VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        allocInfo.allocationSize = memReq.size;
-        allocInfo.memoryTypeIndex = findMemoryType(context.physical_device, memReq.memoryTypeBits,
-                                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-        if (vkAllocateMemory(context.device, &allocInfo, nullptr, &m_counterStagingMemory) != VK_SUCCESS)
-            return false;
-
-        vkBindBufferMemory(context.device, m_counterStagingBuffer, m_counterStagingMemory, 0);
-        vkMapMemory(context.device, m_counterStagingMemory, 0, sizeof(uint32_t), 0, &m_counterStagingMapped);
-    }
-
     // Debug info buffer (GPU-side, written by shaders)
     {
         VkDeviceSize debugSize = sizeof(uint32_t) * 4;  // minMaxPos, numRoots, pad, pad
@@ -228,28 +197,6 @@ bool UFRenderer::createDataStructures(VulkanContext &context)
                           m_debugInfoBuffer, m_debugInfoMemory))
             return false;
 
-        // Staging buffer (CPU-readable)
-        VkBufferCreateInfo bufInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bufInfo.size = debugSize;
-        bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-        if (vkCreateBuffer(context.device, &bufInfo, nullptr, &m_debugInfoStagingBuffer) != VK_SUCCESS)
-            return false;
-
-        VkMemoryRequirements memReq;
-        vkGetBufferMemoryRequirements(context.device, m_debugInfoStagingBuffer, &memReq);
-
-        VkMemoryAllocateInfo allocInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        allocInfo.allocationSize = memReq.size;
-        allocInfo.memoryTypeIndex = findMemoryType(context.physical_device, memReq.memoryTypeBits,
-                                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-        if (vkAllocateMemory(context.device, &allocInfo, nullptr, &m_debugInfoStagingMemory) != VK_SUCCESS)
-            return false;
-
-        vkBindBufferMemory(context.device, m_debugInfoStagingBuffer, m_debugInfoStagingMemory, 0);
-        vkMapMemory(context.device, m_debugInfoStagingMemory, 0, debugSize, 0, &m_debugInfoStagingMapped);
     }
 
     return true;
@@ -1018,22 +965,6 @@ void UFRenderer::destroySizeDependent(VkDevice device)
     }
     m_nodeCapacity = 0;
 
-    if (m_counterStagingBuffer)
-    {
-        if (m_counterStagingMapped)
-        {
-            vkUnmapMemory(device, m_counterStagingMemory);
-            m_counterStagingMapped = nullptr;
-        }
-        vkDestroyBuffer(device, m_counterStagingBuffer, nullptr);
-        m_counterStagingBuffer = VK_NULL_HANDLE;
-    }
-    if (m_counterStagingMemory)
-    {
-        vkFreeMemory(device, m_counterStagingMemory, nullptr);
-        m_counterStagingMemory = VK_NULL_HANDLE;
-    }
-
     if (m_atomicCounterBuffer)
     {
         vkDestroyBuffer(device, m_atomicCounterBuffer, nullptr);
@@ -1098,19 +1029,6 @@ void UFRenderer::destroySizeDependent(VkDevice device)
         vkFreeMemory(device, m_debugInfoMemory, nullptr);
         m_debugInfoMemory = VK_NULL_HANDLE;
     }
-    if (m_debugInfoStagingBuffer) {
-        if (m_debugInfoStagingMapped) {
-            vkUnmapMemory(device, m_debugInfoStagingMemory);
-            m_debugInfoStagingMapped = nullptr;
-        }
-        vkDestroyBuffer(device, m_debugInfoStagingBuffer, nullptr);
-        m_debugInfoStagingBuffer = VK_NULL_HANDLE;
-    }
-    if (m_debugInfoStagingMemory) {
-        vkFreeMemory(device, m_debugInfoStagingMemory, nullptr);
-        m_debugInfoStagingMemory = VK_NULL_HANDLE;
-    }
-
     for (auto &layer : m_layerImages)
     {
         if (layer.framebuffer)
@@ -1159,7 +1077,8 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
                                 const glm::mat4 &viewProj,
                                 const glm::mat4 &view,
                                 const glm::mat4 &projection,
-                                uint32_t swapchainImageIndex)
+                                uint32_t swapchainImageIndex,
+                                uint32_t frameSlot, uint64_t applicationFrameId)
 {
     m_projX = projection[0][0];
     m_projY = projection[1][1];
@@ -1170,56 +1089,44 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
     const bool measureThisFrame =
         enableTiming && m_timestampQueryPool != VK_NULL_HANDLE &&
         !useDebugVis && !captureThisFrame;
-    if (captureThisFrame)
+    if (captureThisFrame) {
         timingResults = {};
-
-    // ─── Read back previous frame's results ──────────────────────────────
-    if (measureThisFrame)
-    {
-        readTimingResults(context.device);
+        m_timingReady = false;
     }
 
-    // Read back atomic counter (fragment count) from previous frame
-    if (m_counterStagingMapped)
-    {
-        uint32_t fragCount = *reinterpret_cast<uint32_t *>(m_counterStagingMapped);
-        debugStats.fragmentCount = fragCount;
-        debugStats.nodeCapacity = m_nodeCapacity;
-        debugStats.overflowed = (fragCount >= m_nodeCapacity);
-        debugStats.usage = (m_nodeCapacity > 0)
-            ? (float(fragCount) / float(m_nodeCapacity)) * 100.0f
-            : 0.0f;
+    auto& profile = m_profileFrames.at(frameSlot);
+    if (profile.pending)
+        throw std::logic_error("Profiling slot reused before its fence was harvested");
+    profile.frameId = applicationFrameId;
+    profile.nodeCapacity = m_nodeCapacity;
+    profile.timestampCount = 0;
+    profile.layered = !useDebugVis;
+    profile.grouping = !bypassUnionFind && mergeIterations > 0;
+    profile.evaluationExport = captureThisFrame;
+    profile.timed = measureThisFrame;
+    const uint32_t queryBase = frameSlot * MAX_TIMESTAMPS;
+    if (profile.timed)
+        vkCmdResetQueryPool(cmd, m_timestampQueryPool, queryBase, MAX_TIMESTAMPS);
 
-        if (debugStats.overflowed)
-        {
-            std::cerr << "[UF] ⚠️  NODE BUFFER OVERFLOW: " << fragCount
-                      << " / " << m_nodeCapacity << " ("
-                      << debugStats.usage << "%)" << std::endl;
-        }
-    }
+    // PPLL nodes, heads and layer images are shared by normal flight slots.
+    // Order their reuse, including the preceding slot's diagnostic transfer
+    // reads. This is a queue dependency, not a host wait or a frame-count change.
+    // It is before the start timestamp so older-frame work is not timed here.
+    recordMemoryBarrier(cmd,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+    static_assert(7 + 3 * NUM_LAYERS <= MAX_TIMESTAMPS, "Timestamp capacity too small");
 
-    // Read back debug info (minMaxPos, numRoots) from previous frame
-    if (m_debugInfoStagingMapped)
-    {
-        uint32_t *data = reinterpret_cast<uint32_t *>(m_debugInfoStagingMapped);
-        debugGPUInfo.minMaxPos = data[0];
-        debugGPUInfo.numRegisteredRoots = data[1];
-    }
-
-    // ─── Reset timestamps ────────────────────────────────────────────────
-    m_timestampCount = 0;
-
-    if (measureThisFrame)
-    {
-        vkCmdResetQueryPool(cmd, m_timestampQueryPool, 0, MAX_TIMESTAMPS);
-    }
-
-    auto stamp = [&]()
-    {
-        if (measureThisFrame && m_timestampCount < MAX_TIMESTAMPS)
-        {
-            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                                m_timestampQueryPool, m_timestampCount++);
+    auto stamp = [&]() {
+        if (profile.timed) {
+            if (profile.timestampCount >= MAX_TIMESTAMPS)
+                throw std::logic_error("Timestamp capacity exceeded");
+            // TOP brackets the start of this renderer; BOTTOM markers measure
+            // completion of each dependent phase, including its barriers.
+            const VkPipelineStageFlagBits stage = profile.timestampCount == 0
+                ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+            vkCmdWriteTimestamp(cmd, stage, m_timestampQueryPool,
+                                queryBase + profile.timestampCount++);
         }
     };
 
@@ -1239,11 +1146,6 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT);
-
-    // Copy atomic counter to staging for CPU readback next frame
-    VkBufferCopy counterCopy{};
-    counterCopy.size = sizeof(uint32_t);
-    vkCmdCopyBuffer(cmd, m_atomicCounterBuffer, m_counterStagingBuffer, 1, &counterCopy);
 
     stamp(); // [2] after collect
 
@@ -1268,7 +1170,6 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
     // ═════════════════════════════════════════════════════════════════════
     // PHASE 5 & 6: MERGE + COMPRESS (iterative, skipped if bypass)
     // ═════════════════════════════════════════════════════════════════════
-    int mergeIterations = 2;
     if (!bypassUnionFind)
     {
         for (uint32_t iter = 0; iter < mergeIterations; iter++)
@@ -1284,8 +1185,7 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
         }
     }
-    stamp(); // [5] after merge (or placeholder if bypassed)
-    stamp(); // [6] after compress (or placeholder if bypassed)
+    stamp(); // [5] end of ALL merge-compression iterations, including barriers
 
     if (captureThisFrame)
         recordEvaluationReadback(cmd, static_cast<uint32_t>(mergeIterations));
@@ -1321,6 +1221,7 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
 
         // Render debug directly to swapchain
         recordDebugRegionsPhase(cmd, swapchainImageIndex);
+        stamp(); // [6] end of debug output (no extraction on this path)
     }
     else
     {
@@ -1376,15 +1277,6 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
             stamp();
         }
 
-        // ─── Copy debug info to staging for CPU readback ─────────────────
-        recordMemoryBarrier(cmd,
-                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-
-        VkBufferCopy debugCopy{};
-        debugCopy.size = 4 * sizeof(uint32_t);
-        vkCmdCopyBuffer(cmd, m_debugInfoBuffer, m_debugInfoStagingBuffer, 1, &debugCopy);
-
         // ─── Composite ───────────────────────────────────────────────────
         recordMemoryBarrier(cmd,
                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
@@ -1394,7 +1286,28 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
         stamp();
     }
 
-    m_timingReady = measureThisFrame;
+    // Profiling transfers are AFTER the renderer's final marker and BEFORE
+    // ImGui. Their GPU cost is excluded from renderer_gpu_ms but remains in
+    // application frame intervals. Keep readback memory private to this slot.
+    recordMemoryBarrier(cmd,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    VkBufferCopy counterCopy{0, 0, sizeof(uint32_t)};
+    vkCmdCopyBuffer(cmd, m_atomicCounterBuffer, profile.readbackBuffer, 1, &counterCopy);
+    if (profile.layered) {
+        VkBufferCopy debugCopy{0, sizeof(uint32_t), 4 * sizeof(uint32_t)};
+        vkCmdCopyBuffer(cmd, m_debugInfoBuffer, profile.readbackBuffer, 1, &debugCopy);
+    }
+    VkBufferMemoryBarrier hostBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    hostBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    hostBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    hostBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    hostBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    hostBarrier.buffer = profile.readbackBuffer;
+    hostBarrier.offset = 0;
+    hostBarrier.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 0, nullptr, 1, &hostBarrier, 0, nullptr);
 }
 // ═══════════════════════════════════════════════════════════════════════════════
 // PHASE 1: CLEAR
@@ -1862,62 +1775,145 @@ void UFRenderer::recordMemoryBarrier(VkCommandBuffer cmd,
     vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
-void UFRenderer::readTimingResults(VkDevice device)
+bool UFRenderer::createProfilingResources(VulkanContext& context)
 {
-    if (!enableTiming || !m_timestampQueryPool || m_timestampCount == 0)
-        return;
-
-    uint64_t results[MAX_TIMESTAMPS];
-    VkResult res = vkGetQueryPoolResults(device, m_timestampQueryPool,
-                                         0, m_timestampCount, sizeof(results), results, sizeof(uint64_t),
-                                         VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
-
-    if (res == VK_SUCCESS)
-    {
-        memcpy(m_timestamps, results, sizeof(uint64_t) * m_timestampCount);
-        computeTimingResults();
+    const uint32_t frames = SwapchainManager::MAX_FRAMES_IN_FLIGHT;
+    m_profileFrames.resize(frames);
+    // Four debug uints plus the allocation-request counter for each flight slot.
+    for (auto& frame : m_profileFrames) {
+        VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        info.size = 5 * sizeof(uint32_t);
+        info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(context.device, &info, nullptr, &frame.readbackBuffer) != VK_SUCCESS)
+            return false;
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(context.device, frame.readbackBuffer, &requirements);
+        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocation.allocationSize = requirements.size;
+        allocation.memoryTypeIndex = findMemoryType(context.physical_device, requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(context.device, &allocation, nullptr, &frame.readbackMemory) != VK_SUCCESS ||
+            vkBindBufferMemory(context.device, frame.readbackBuffer, frame.readbackMemory, 0) != VK_SUCCESS ||
+            vkMapMemory(context.device, frame.readbackMemory, 0, VK_WHOLE_SIZE, 0, &frame.mapped) != VK_SUCCESS)
+            return false;
     }
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(context.physical_device, &properties);
+    m_timestampPeriod = properties.limits.timestampPeriod;
+    uint32_t count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(context.physical_device, &count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(count);
+    vkGetPhysicalDeviceQueueFamilyProperties(context.physical_device, &count, families.data());
+    m_timestampValidBits = families.at(context.graphics_queue_family).timestampValidBits;
+    if (m_timestampValidBits && m_timestampPeriod > 0) {
+        VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+        info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        info.queryCount = MAX_TIMESTAMPS * frames;
+        if (vkCreateQueryPool(context.device, &info, nullptr, &m_timestampQueryPool) != VK_SUCCESS)
+            m_timestampQueryPool = VK_NULL_HANDLE; // CPU/diagnostic capture still works.
+    }
+    return true;
 }
 
-void UFRenderer::computeTimingResults()
+void UFRenderer::destroyProfilingResources(VkDevice device)
 {
-    auto ms = [&](uint32_t start, uint32_t end) -> float
-    {
-        if (end >= m_timestampCount || start >= m_timestampCount)
-            return 0.0f;
-        uint64_t diff = m_timestamps[end] - m_timestamps[start];
-        return float(diff) * m_timestampPeriod / 1000000.0f;
-    };
-
-    // One-time passes: timestamps [0]-[6]
-    timingResults.clear = ms(0, 1);
-    timingResults.collect = ms(1, 2);
-    timingResults.sort = ms(2, 3);
-    timingResults.initParents = ms(3, 4);
-    timingResults.merge = ms(4, 5);
-    timingResults.compress = ms(5, 6);
-
-    // Peels: each peel has 3 timestamps at [7+i*3], [8+i*3], [9+i*3]
-    timingResults.peelTotal = 0;
-    for (uint32_t i = 0; i < NUM_LAYERS; i++)
-    {
-        uint32_t base = 7 + i * 3;
-        // clearTable: from previous stamp to base
-        // For peel 0: from [6] to [7]. For peel N: from [9+(N-1)*3] to [7+N*3]
-        uint32_t peelStart = (i == 0) ? 6 : (9 + (i - 1) * 3);
-        timingResults.peels[i].clearTable = ms(peelStart, base);
-        timingResults.peels[i].registerRoots = ms(base, base + 1);
-        timingResults.peels[i].resolve = ms(base + 1, base + 2);
-        timingResults.peels[i].total = ms(peelStart, base + 2);
-        timingResults.peelTotal += timingResults.peels[i].total;
+    for (auto& frame : m_profileFrames) {
+        if (frame.mapped) vkUnmapMemory(device, frame.readbackMemory);
+        if (frame.readbackBuffer) vkDestroyBuffer(device, frame.readbackBuffer, nullptr);
+        if (frame.readbackMemory) vkFreeMemory(device, frame.readbackMemory, nullptr);
     }
+    m_profileFrames.clear();
+    if (m_timestampQueryPool) vkDestroyQueryPool(device, m_timestampQueryPool, nullptr);
+    m_timestampQueryPool = VK_NULL_HANDLE;
+}
 
-    // Composite: from last peel end to final stamp
-    uint32_t compositeStart = 9 + (NUM_LAYERS - 1) * 3;
-    uint32_t compositeEnd = compositeStart + 1;
-    timingResults.composite = ms(compositeStart, compositeEnd);
-
-    timingResults.total = ms(0, m_timestampCount - 1);
+std::optional<performance::GpuFrameResult> UFRenderer::resolveCompletedFrame(VkDevice device, uint32_t slot)
+{
+    auto& frame = m_profileFrames.at(slot);
+    if (!frame.pending) return std::nullopt;
+    frame.pending = false;
+    performance::GpuFrameResult result;
+    result.frameId = frame.frameId;
+    // The application has observed this generation's fence, so both these
+    // coherent transfers and the query reset/write commands have executed.
+    const auto* data = static_cast<const uint32_t*>(frame.mapped);
+    const uint64_t requests = data[0];
+    const uint64_t capacity = frame.nodeCapacity;
+    result.allocationRequests = requests;
+    result.storedFragments = std::min(requests, capacity);
+    result.nodePoolOverflow = requests > capacity ? requests - capacity : 0;
+    // Retained != stored: uf_sort truncates each pixel's list to 32 nodes.
+    // No existing shader counter measures that truncation. Leave both NA.
+    debugStats.fragmentCount = static_cast<uint32_t>(requests);
+    debugStats.nodeCapacity = frame.nodeCapacity;
+    debugStats.overflowed = requests > capacity; // Exactly full is NOT overflow.
+    debugStats.usage = capacity ? float(100.0 * *result.storedFragments / capacity) : 0.0f;
+    if (frame.layered) {
+        debugGPUInfo.minMaxPos = data[1];
+        debugGPUInfo.numRegisteredRoots = data[2]; // Last peel, not peel zero.
+    }
+    m_timingReady = false;
+    if (!frame.timed) {
+        result.status = frame.evaluationExport ? "evaluation_export_excluded" :
+            !frame.layered ? "debug_visualization_not_measured" :
+            timestampsSupported() ? "timing_disabled" : "timestamps_unsupported";
+        return result;
+    }
+    struct Query { uint64_t ticks = 0, available = 0; };
+    std::array<Query, MAX_TIMESTAMPS> queries{};
+    const VkResult queryResult = vkGetQueryPoolResults(device, m_timestampQueryPool,
+        slot * MAX_TIMESTAMPS, frame.timestampCount,
+        sizeof(Query) * frame.timestampCount, queries.data(), sizeof(Query),
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+    if (queryResult != VK_SUCCESS && queryResult != VK_NOT_READY) {
+        result.status = "query_error_" + std::to_string(static_cast<int>(queryResult));
+        return result;
+    }
+    auto ms = [&](uint32_t a, uint32_t b) -> std::optional<double> {
+        if (a >= frame.timestampCount || b >= frame.timestampCount ||
+            !queries[a].available || !queries[b].available) return std::nullopt;
+        return performance::timestampMilliseconds(queries[a].ticks, queries[b].ticks,
+                                                  m_timestampValidBits, m_timestampPeriod);
+    };
+    result.clearMs = ms(0, 1);
+    result.collectMs = ms(1, 2);
+    result.sortMs = ms(2, 3);
+    result.initParentsMs = ms(3, 4);
+    if (frame.grouping) result.groupingMs = ms(4, 5);
+    result.rendererMs = ms(0, frame.timestampCount - 1);
+    if (frame.layered) {
+        const uint32_t finalResolve = 5 + 3 * NUM_LAYERS;
+        result.extractionMs = ms(5, finalResolve);
+        result.compositeMs = ms(finalResolve, finalResolve + 1);
+    }
+    const bool allAvailable = std::all_of(queries.begin(), queries.begin() + frame.timestampCount,
+                                         [](const Query& q) { return q.available != 0; });
+    result.status = allAvailable ? (frame.grouping ? "available" : "grouping_bypassed")
+                                 : "query_unavailable_after_fence";
+    // UI fields are refreshed only from this completed frame. CSV never reads
+    // these display values and never substitutes them for missing samples.
+    timingResults = {};
+    timingResults.clear = float(result.clearMs.value_or(0));
+    timingResults.collect = float(result.collectMs.value_or(0));
+    timingResults.sort = float(result.sortMs.value_or(0));
+    timingResults.initParents = float(result.initParentsMs.value_or(0));
+    timingResults.grouping = float(result.groupingMs.value_or(0));
+    timingResults.total = float(result.rendererMs.value_or(0));
+    if (frame.layered) {
+        for (uint32_t i = 0; i < NUM_LAYERS; ++i) {
+            const uint32_t start = 5 + i * 3;
+            auto& peel = timingResults.peels[i];
+            peel.clearTable = float(ms(start, start + 1).value_or(0));
+            peel.registerRoots = float(ms(start + 1, start + 2).value_or(0)); // Includes find-min.
+            peel.resolve = float(ms(start + 2, start + 3).value_or(0));
+            peel.total = float(ms(start, start + 3).value_or(0));
+        }
+        timingResults.peelTotal = float(result.extractionMs.value_or(0));
+        timingResults.composite = float(result.compositeMs.value_or(0));
+    }
+    m_timingReady = allAvailable;
+    return result;
 }
 
 void UFRenderer::selectRegionAtPixel(int32_t x, int32_t y)
@@ -1938,6 +1934,10 @@ void UFRenderer::selectRegionAtPixel(int32_t x, int32_t y)
 bool UFRenderer::requestEvaluationExport(std::string filename)
 {
     if (isEvaluationExportPending()) return false;
+    if (m_performanceCaptureActive) {
+        m_evaluationStatus = "Stop or cancel performance capture before exporting fragment evaluation.";
+        return false;
+    }
     if (bypassUnionFind) {
         m_evaluationStatus = "Enable Union-Find before exporting.";
         return false;

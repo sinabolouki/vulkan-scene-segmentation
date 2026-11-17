@@ -110,6 +110,7 @@ bool SwapchainManager::createSwapchain(VulkanContext& context, uint32_t width, u
     vkb::Swapchain vkbSwapchain = swapchainResult.value();
     m_swapchain = vkbSwapchain.swapchain;
     m_imageFormat = vkbSwapchain.image_format;
+    m_presentMode = vkbSwapchain.present_mode; // Actual choice, including FIFO fallback.
     m_extent = vkbSwapchain.extent;
     m_images = vkbSwapchain.get_images().value();
 

@@ -6,7 +6,7 @@ bool VulkanContext::init(GLFWwindow* window) {
     vkb::InstanceBuilder instance_builder;
     auto instance_result = instance_builder
         .set_app_name("DepthPeelingRenderer")
-        .request_validation_layers(true)
+        .request_validation_layers(false)
         .use_default_debug_messenger()
         .require_api_version(1, 3, 0)
         .build();

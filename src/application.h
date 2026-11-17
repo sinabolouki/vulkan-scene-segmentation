@@ -187,6 +187,26 @@ private:
     bool   m_firstMouse = true;
 
 #ifdef RENDER_METHOD_UNION_FIND
+    // Performance capture is compiled only for the union-find renderer.
+    performance::Capture m_performanceCapture;
+    uint64_t m_applicationFrameId = 0;
+    float m_captureWarmupSeconds = 30.0f;
+    int m_captureSampleCount = 1000;
+    bool m_freezeCamera = false; // Explicitly set by the user before capture.
+    char m_captureSceneLabel[128] = "scene";
+    char m_capturePoseLabel[128] = "pose_01";
+    char m_captureOutputDirectory[512] = "performance_captures";
+#ifdef THESIS_BUILD_CONFIGURATION
+    char m_captureBuildConfiguration[128] = THESIS_BUILD_CONFIGURATION;
+#else
+    char m_captureBuildConfiguration[128] = ""; // User supplies exact config, or use CMake helper.
+#endif
+    std::string m_scenePath;
+    void drawPerformancePanel();
+    void pollPerformanceResults();
+    void exportFinishedPerformanceCapture();
+    performance::Metadata performanceMetadata();
+
     void updateRegionSelectionInput();
 
     bool m_regionPickPending = false;
