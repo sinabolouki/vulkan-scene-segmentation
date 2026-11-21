@@ -253,10 +253,6 @@ void Application::drawFrame()
             "        fragments are never merged regardless of color.");
     }
 
-    int mergeIterations = static_cast<int>(m_renderer.mergeIterations);
-    if (ImGui::SliderInt("Merge-compression iterations", &mergeIterations, 1, 8))
-        m_renderer.mergeIterations = static_cast<uint32_t>(mergeIterations);
-
     // ─── Connectivity Parameters ───
     ImGui::Text("Connectivity Parameters");
     ImGui::Separator();
@@ -1893,7 +1889,7 @@ performance::Metadata Application::performanceMetadata()
     val("color_threshold", m_renderer.colorThreshold);
     val("proximity_scale", m_renderer.proximityScale);
     val("plane_threshold", m_renderer.planeThreshold);
-    val("merge_compression_iterations", m_renderer.mergeIterations);
+    val("merge_compression_iterations", 1);
     val("bypass_union_find", m_renderer.bypassUnionFind ? 1 : 0);
     val("extraction_iterations", UFRenderer::NUM_LAYERS);
     val("display_layer", m_renderer.debugDisplayLayer);
@@ -1955,7 +1951,6 @@ void Application::drawPerformancePanel()
         m_renderer.colorThreshold = 0.05f;
         m_renderer.proximityScale = 0.7f;
         m_renderer.planeThreshold = 1.5f;
-        m_renderer.mergeIterations = 2;
         m_renderer.debugVisualizationMode = -1;
         m_renderer.debugDisplayLayer = -1;
         m_renderer.bypassUnionFind = false;

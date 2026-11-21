@@ -41,7 +41,7 @@ struct Metadata {
     std::uint32_t node_capacity = 0;
     std::uint32_t allocation_requests = 0;
     std::uint32_t per_pixel_limit = 32;
-    std::uint32_t merge_iterations = 2;
+    std::uint32_t merge_iterations = 1;
     std::uint32_t merge_mode = 0;
     float proximity_scale = 0;
     float plane_threshold = 0;

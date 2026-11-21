@@ -7,17 +7,17 @@
 // This pass flattens each tree so that every node points directly to its root.
 // After this pass: parent[i] == root of the connected component containing i.
 //
-// Uses "inline compression" from Bolelli et al. — updates intermediate nodes
-// during traversal so concurrent reads benefit immediately.
+// Parent reads and updates are atomic because paths from different starting
+// nodes can overlap. Merging must finish, with a host memory dependency,
+// before compression begins. The root of each component is then stable.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#define NULL_IDX      0xFFFFFFFF
-#define MAX_FRAGS     32
-#define MAX_FIND_ITER 64
+#define NULL_IDX      0xFFFFFFFFu
+#define MAX_FRAGS     32u
 
 // ─── Descriptors ─────────────────────────────────────────────────────────────
 
-layout(set = 0, binding = 0, r32ui) uniform uimage2D headPointerImage;
+layout(set = 0, binding = 0, r32ui) uniform readonly uimage2D headPointerImage;
 
 struct FragmentNode {
     uint  color;
@@ -30,11 +30,11 @@ struct FragmentNode {
     uint  next;
 };
 
-layout(set = 0, binding = 1, std430) buffer NodeBuffer {
+layout(set = 0, binding = 1, std430) readonly buffer NodeBuffer {
     FragmentNode nodes[];
 };
 
-layout(set = 0, binding = 2, std430) buffer AtomicCounter {
+layout(set = 0, binding = 2, std430) readonly buffer AtomicCounter {
     uint counter;
 };
 
@@ -53,43 +53,57 @@ layout(push_constant) uniform PushConstants {
 };
 
 // ─── Inline Compress ─────────────────────────────────────────────────────────
-// Finds root and simultaneously flattens the path: every node along the way
-// gets pointed directly to the root.
+// First find a confirmed root, then flatten the path atomically.
+// Neither phase treats a traversal budget as evidence of reaching a root.
+
+uint readParent(uint x) {
+    return atomicAdd(parent[x], 0u);
+}
 
 uint inlineCompress(uint x) {
-    uint startNode = x;
-
     // Phase 1: find root
     uint root = x;
-    for (uint i = 0; i < MAX_FIND_ITER; i++) {
-        uint p = parent[root];
+    while (true) {
+        uint p = readParent(root);
         if (p == root) break;
         root = p;
     }
 
-    // Phase 2: compress path — point every node from start to root directly
-    uint current = startNode;
-    for (uint i = 0; i < MAX_FIND_ITER; i++) {
-        uint p = parent[current];
-        if (p == root) break;
-        parent[current] = root;
-        current = p;
+    // Phase 2: atomically redirect visited nodes to the stable root.
+    // atomicMin returns the old parent, so no separate ordinary read is needed.
+    uint current = x;
+    while (current != root) {
+        current = atomicMin(parent[current], root);
     }
 
     return root;
 }
 
+bool validNodeIndex(uint index, uint validNodeCount) {
+    return index != NULL_IDX && index < validNodeCount;
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 void main() {
+    // Helper invocations have no usable return values from buffer atomics.
+    if (gl_HelperInvocation) return;
+
     ivec2 coord = ivec2(gl_FragCoord.xy);
 
-    if (coord.x >= int(screenWidth) || coord.y >= int(screenHeight)) return;
+    if (coord.x < 0 || coord.y < 0 ||
+        coord.x >= int(screenWidth) || coord.y >= int(screenHeight)) return;
+
+    uint validNodeCount = min(
+        counter,
+        min(uint(nodes.length()), uint(parent.length()))
+    );
+    if (validNodeCount == 0u) return;
 
     uint idx = imageLoad(headPointerImage, coord).r;
-    uint count = 0;
+    uint count = 0u;
 
-    while (idx != NULL_IDX && count < MAX_FRAGS) {
+    while (validNodeIndex(idx, validNodeCount) && count < MAX_FRAGS) {
         // Compress: parent[idx] = root of its tree
         inlineCompress(idx);
         idx = nodes[idx].next;

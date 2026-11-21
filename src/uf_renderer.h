@@ -43,7 +43,6 @@ public:
     float proximityScale = 0.7f;
     float colorThreshold = 0.05f;
     int debugDisplayLayer = -1;
-    uint32_t mergeIterations = 2;
     uint32_t mergeMode = 0;  // 0 = balanced, 1 = color priority, 2 = space priority
 
 
@@ -231,8 +230,7 @@ private:
     std::string m_evaluationStatus = "No evaluation export yet.";
 
     bool prepareEvaluationReadback(VulkanContext& context);
-    void recordEvaluationReadback(
-        VkCommandBuffer cmd, uint32_t mergeIterationCount);
+    void recordEvaluationReadback(VkCommandBuffer cmd);
     void destroyEvaluationReadback(VkDevice device);
 
 

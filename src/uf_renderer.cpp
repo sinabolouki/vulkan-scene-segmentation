@@ -1101,7 +1101,7 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
     profile.nodeCapacity = m_nodeCapacity;
     profile.timestampCount = 0;
     profile.layered = !useDebugVis;
-    profile.grouping = !bypassUnionFind && mergeIterations > 0;
+    profile.grouping = !bypassUnionFind;
     profile.evaluationExport = captureThisFrame;
     profile.timed = measureThisFrame;
     const uint32_t queryBase = frameSlot * MAX_TIMESTAMPS;
@@ -1172,23 +1172,20 @@ void UFRenderer::recordCommands(VkCommandBuffer cmd,
     // ═════════════════════════════════════════════════════════════════════
     if (!bypassUnionFind)
     {
-        for (uint32_t iter = 0; iter < mergeIterations; iter++)
-        {
-            recordMergePhase(cmd);
-            recordMemoryBarrier(cmd,
-                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        recordMergePhase(cmd);
+        recordMemoryBarrier(cmd,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-            recordCompressPhase(cmd);
-            recordMemoryBarrier(cmd,
-                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-        }
+        recordCompressPhase(cmd);
+        recordMemoryBarrier(cmd,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     }
     stamp(); // [5] end of ALL merge-compression iterations, including barriers
 
     if (captureThisFrame)
-        recordEvaluationReadback(cmd, static_cast<uint32_t>(mergeIterations));
+        recordEvaluationReadback(cmd);
 
     // ═════════════════════════════════════════════════════════════════════
     // OUTPUT: Either debug visualization or peel+composite
@@ -2048,10 +2045,9 @@ bool UFRenderer::prepareEvaluationReadback(VulkanContext& context)
 }
 
 void UFRenderer::recordEvaluationReadback(
-    VkCommandBuffer cmd, uint32_t mergeIterationCount)
+    VkCommandBuffer cmd)
 {
     auto& snapshot = m_evaluationReadback;
-    snapshot.metadata.merge_iterations = mergeIterationCount;
 
     // Include prior transfer clears as well as shader writes. Empty pixels may
     // still contain the value produced by the transfer clear.

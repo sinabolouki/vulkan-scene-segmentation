@@ -399,8 +399,8 @@ void main() {
 
     // No fragment at this pixel
     if (idx == NULL_IDX || idx >= counter) {
-        // outColor = vec4(0.02, 0.02, 0.08, 1.0);
-        outColor = vec4(1.0);
+        outColor = vec4(0.02, 0.02, 0.08, 1.0);
+        // outColor = vec4(1.0);
         return;
     }
 

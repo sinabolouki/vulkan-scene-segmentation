@@ -19,7 +19,6 @@
 
 #define NULL_IDX       0xFFFFFFFFu
 #define MAX_FRAGS      32u
-#define MAX_FIND_ITER  64u
 
 // How many ranks above/below to consider when matching across pixels.
 // ±1 handles single-fragment insertions between pixels.
@@ -287,17 +286,24 @@ float connectionCost(uint idxA, uint idxB, ivec2 pixelA, ivec2 pixelB) {
 
 // ─── Union-Find ──────────────────────────────────────────────────────────────
 
+// All accesses to parents that can change within this pass are atomic.
+// GLSL 450 has no core atomicLoad; adding zero performs an atomic read.
+uint readParent(uint x) {
+    return atomicAdd(parent[x], 0u);
+}
+
 uint findRoot(uint x) {
-    for (uint i = 0u; i < MAX_FIND_ITER; ++i) {
-        uint p = parent[x];
-        if (p == x) break;
+    while (true) {
+        uint p = readParent(x);
+        if (p == x) return x;
         x = p;
     }
-    return x;
 }
 
 void unionSets(uint a, uint b) {
-    for (uint iteration = 0u; iteration < MAX_FIND_ITER; ++iteration) {
+    // Valid parent links strictly decrease until a self-parented root.
+    // Finish the union instead of silently abandoning an accepted edge.
+    while (true) {
         a = findRoot(a);
         b = findRoot(b);
 
@@ -308,6 +314,12 @@ void unionSets(uint a, uint b) {
 
         uint previous = atomicMin(parent[high], low);
         if (previous == high || previous == low) return;
+
+        // A competing union already linked high elsewhere. If atomicMin
+        // replaced that link, its former parent must also be joined to low.
+        // Re-searching only high and low would discard that connection.
+        a = previous;
+        b = low;
     }
 }
 
@@ -318,6 +330,9 @@ bool validNodeIndex(uint index, uint validNodeCount) {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 void main() {
+    // Helper invocations have no usable return values from buffer atomics.
+    if (gl_HelperInvocation) return;
+
     ivec2 coordinate = ivec2(gl_FragCoord.xy);
 
     if (coordinate.x < 0 || coordinate.y < 0 ||
