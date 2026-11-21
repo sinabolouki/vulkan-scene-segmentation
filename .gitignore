@@ -255,3 +255,5 @@ python/inspect_out/
 !/assets/Sponza/**/*.obj
 !/assets/furniture_scene/
 !/assets/furniture_scene/**/*.obj
+!/assets/circles16.obj
+!/assets/simple_scene.obj
