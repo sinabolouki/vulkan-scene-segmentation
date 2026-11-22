@@ -256,7 +256,7 @@ void Application::drawFrame()
     // ─── Connectivity Parameters ───
     ImGui::Text("Connectivity Parameters");
     ImGui::Separator();
-    ImGui::SliderFloat("Plane Threshold", &m_renderer.planeThreshold, 0.1f, 10.0f, "%.2f");
+    ImGui::SliderFloat("Tangent-Plane Scale", &m_renderer.planeThreshold, 0.1f, 10.0f, "%.2f");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Tangent-plane residual tolerance (x pixelStep).\n"
                           "Higher = more permissive on curved surfaces.\n"
@@ -268,7 +268,7 @@ void Application::drawFrame()
                           "Higher = merges cube edges more aggressively.\n"
                           "Lower = may split objects at sharp creases.");
 
-    ImGui::SliderFloat("Color Threshold", &m_renderer.colorThreshold, 0.05f, 1.5f, "%.2f");
+    ImGui::SliderFloat("Color Scale", &m_renderer.colorThreshold, 0.05f, 1.5f, "%.2f");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Chromaticity distance veto.\n"
                           "Lower = stricter (splits at subtle color changes).\n"
